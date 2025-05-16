@@ -4,7 +4,6 @@ use std::io::Write;
 
 use clap::Parser;
 use noodles_bam as bam;
-use tokio::task;
 use nanocov::parse_bed;
 
 /// Simple BAM coverage calculator
