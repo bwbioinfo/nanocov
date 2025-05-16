@@ -182,16 +182,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Write per-position coverage to a file (TSV format)
-    let mut out = File::create(&cli.output)?;
+    // Write per-position coverage to a file (TSV format) using BufWriter and parallel formatting
+    use std::io::BufWriter;
+    let mut out = BufWriter::new(File::create(&cli.output)?);
     writeln!(out, "#chromosome\tposition\tcount")?;
-    for (ref_name, region_coverage) in &coverage {
-        let mut positions: Vec<_> = region_coverage.iter().collect();
-        positions.sort_by_key(|&(pos, _)| *pos);
-        for (pos, count) in positions {
-            writeln!(out, "{}\t{}\t{}", ref_name, pos, count)?;
-        }
+    // Parallelize formatting of coverage lines per chromosome
+    let chrom_blocks: Vec<(String, String)> = coverage.par_iter()
+        .map(|(ref_name, region_coverage)| {
+            let mut positions: Vec<_> = region_coverage.iter().collect();
+            positions.sort_by_key(|&(pos, _)| *pos);
+            let mut block = String::with_capacity(positions.len() * 24); // estimate
+            for (pos, count) in positions {
+                // Use write! for efficient formatting
+                use std::fmt::Write as _;
+                let _ = write!(block, "{}\t{}\t{}\n", ref_name, pos, count);
+            }
+            (ref_name.clone(), block)
+        })
+        .collect();
+    // Write each chromosome's block in order (sorted by chromosome name)
+    let mut chrom_blocks = chrom_blocks;
+    chrom_blocks.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_ref_name, block) in chrom_blocks {
+        out.write_all(block.as_bytes())?;
     }
+    out.flush()?;
 
     // Print per-chromosome averages and global average to stdout
     if !per_chrom_averages.is_empty() {
