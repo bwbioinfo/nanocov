@@ -19,6 +19,14 @@ struct Cli {
     /// BED file with regions to include (chrom, start, end)
     #[arg(short = 'b', long = "bed")]
     bed: Option<PathBuf>,
+
+    /// Number of threads to use (default: half of available cores)
+    #[arg(short = 't', long = "threads")]
+    threads: Option<usize>,
+
+    /// Output file path (default: coverage.tsv)
+    #[arg(short = 'o', long = "output", default_value = "coverage.tsv")]
+    output: PathBuf,
 }
 
 #[tokio::main]
@@ -37,7 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let records: Vec<_> = reader.records().collect::<Result<_, _>>()?;
-    let n_threads = num_cpus::get();
+    // Determine number of threads
+    let n_threads = cli.threads.unwrap_or_else(|| std::cmp::max(1, num_cpus::get() / 2));
     let chunk_size = (records.len() + n_threads - 1) / n_threads;
     let coverage_results = futures::future::join_all(
         records
@@ -101,13 +110,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Write per-position coverage to a file
-    let mut out = File::create("coverage.tsv")?;
+    let mut out = File::create(&cli.output)?;
+    writeln!(out, "#chromosome\tposition\tcount")?;
     for (ref_name, region_coverage) in &coverage {
-        writeln!(out, "# {}", ref_name)?;
         let mut positions: Vec<_> = region_coverage.iter().collect();
         positions.sort_by_key(|&(pos, _)| *pos);
         for (pos, count) in positions {
-            writeln!(out, "{}\t{}", pos, count)?;
+            writeln!(out, "{}\t{}\t{}", ref_name, pos, count)?;
         }
     }
 
