@@ -9,6 +9,7 @@ use noodles_core::Region;
 use noodles_core::Position;
 use nanocov::parse_bed;
 use rayon::prelude::*;
+use plotters::prelude::*;
 
 /// Simple BAM coverage calculator
 #[derive(Parser, Debug)]
@@ -222,5 +223,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("No coverage data found.");
     }
+
+    // Output histogram of per-chromosome average coverage using plotters
+    let histo_path = cli.output.with_extension("chrom_coverage.png");
+    let chrom_names: Vec<_> = {
+        let mut v: Vec<_> = coverage.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    let chrom_indices: Vec<_> = (0..chrom_names.len()).collect();
+    let chrom_avgs: Vec<f64> = chrom_names.iter().map(|chrom| {
+        let region_coverage = &coverage[chrom];
+        let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+        if count > 0 {
+            total as f64 / count as f64
+        } else {
+            0.0
+        }
+    }).collect();
+    let y_max = chrom_avgs.iter().cloned().fold(0./0., f64::max).max(1.0);
+    let root = BitMapBackend::new(&histo_path, (800, 600)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Per-chromosome Average Coverage", ("sans-serif", 30))
+        .margin(40)
+        .x_label_area_size(40)
+        .y_label_area_size(60)
+        .build_cartesian_2d(0..chrom_names.len(), 0f64..y_max)?;
+    chart.configure_mesh()
+        .x_labels(chrom_names.len())
+        .x_label_formatter(&|idx| chrom_names.get(*idx).cloned().unwrap_or_default())
+        .y_desc("Average Coverage")
+        .x_desc("Chromosome")
+        .draw()?;
+    chart.draw_series(
+        chrom_indices.iter().zip(chrom_avgs.iter()).map(|(i, avg)| {
+            Rectangle::new([
+                (*i, 0.0),
+                (*i, *avg)
+            ], BLUE.filled())
+        })
+    )?;
+    println!("Chromosome coverage histogram saved to {:?}", histo_path);
+
     Ok(())
 }
