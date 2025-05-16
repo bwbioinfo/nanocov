@@ -8,6 +8,7 @@ use noodles_bam as bam;
 use noodles_core::Region;
 use noodles_core::Position;
 use nanocov::parse_bed;
+use rayon::prelude::*;
 
 /// Simple BAM coverage calculator
 #[derive(Parser, Debug)]
@@ -29,6 +30,10 @@ struct Cli {
     /// Output file path (default: coverage.tsv)
     #[arg(short = 'o', long = "output", default_value = "coverage.tsv")]
     output: PathBuf,
+
+    /// Chunk size for parallel processing (default: 10,000)
+    #[arg(short = 'c', long = "chunk-size", default_value_t = 10_000)]
+    chunk_size: usize,
 }
 
 #[tokio::main]
@@ -52,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get reference sequence dictionary (HashMap<String, ReferenceSequence>)
     let reference_sequences = header.reference_sequences();
     // Collect reference names as Vec<String>
-    let ref_names: Vec<_> = reference_sequences.keys().cloned().collect();
+    let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
 
     // Parse BED file if provided; returns Option<HashMap<String, Vec<(u32, u32)>>> mapping chrom to regions
     let bed_regions = if let Some(bed_path) = &cli.bed {
@@ -61,13 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Determine number of threads to use for chunked processing
-    let n_threads = cli.threads.unwrap_or_else(|| std::cmp::max(1, num_cpus::get() / 2));
-
-    // Shared state for coverage and per-chromosome averages, protected by Mutex for thread safety
-    use std::sync::{Arc, Mutex};
-    let coverage = Arc::new(Mutex::new(HashMap::new()));
-    let per_chrom_averages = Arc::new(Mutex::new(Vec::new()));
+    // Determine number of threads to use for chunked processing (handled by rayon now)
+    // (Rayon uses the number of logical CPUs by default, or can be configured via RAYON_NUM_THREADS)
 
     // Use index-backed region queries if BED is provided
     let mut records = Vec::new();
@@ -115,34 +115,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Calculate per-chromosome coverage and average, then global average
-    // Split records into chunks for parallel processing using tokio tasks
-    let mut handles = Vec::new();
-    for chunk in records.chunks(n_threads) {
-        let chunk = chunk.to_vec();
-        let ref_names = ref_names.clone();
-        let bed_regions = bed_regions.clone();
-        // Spawn a tokio task for each chunk
-        let handle = tokio::spawn(async move {
-            // local_coverage: HashMap<String, HashMap<u32, u32>>
-            //   maps chromosome -> position -> count
+    // Split records into chunks for parallel processing using rayon
+    let chunk_size = cli.chunk_size;
+    let ref_names = ref_names.clone();
+    let bed_regions = bed_regions.clone();
+    // Rayon parallel iterator over record chunks
+    let results: Vec<_> = records.par_chunks(chunk_size)
+        .map(|chunk| {
             let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
-            // local_averages: HashMap<String, f64> for per-chromosome averages
             let mut local_averages: HashMap<String, f64> = HashMap::new();
             for record in chunk {
-                // Skip unmapped records
                 if record.flags().is_unmapped() {
                     continue;
                 }
-                // Get reference sequence index for this record
                 let ref_id = match record.reference_sequence_id() {
                     Some(Ok(id)) => id,
                     _ => continue,
                 };
-                // Convert reference index to chromosome name (String)
                 let ref_name = ref_names.get(ref_id)
-                    .map(|bstr| String::from_utf8_lossy(&bstr.to_vec()).into_owned())
+                    .map(|name| name.clone())
                     .unwrap_or_else(|| "unknown".to_string());
-                // If BED regions are present, check if this record overlaps any region
                 if let Some(ref regions) = bed_regions {
                     if let Some(region_list) = regions.get(&ref_name) {
                         let start = match record.alignment_start() {
@@ -151,7 +143,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let len = record.cigar().len() as u32;
                         let end = start + len;
-                        // Only count records overlapping any region in the BED
                         if !region_list.iter().any(|&(r_start, r_end)| start < r_end && end > r_start) {
                             continue;
                         }
@@ -159,7 +150,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 }
-                // Calculate per-base coverage for this record
                 let start = match record.alignment_start() {
                     Some(Ok(pos)) => pos.get() as u32,
                     _ => continue,
@@ -170,7 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *region_coverage.entry(pos).or_insert(0) += 1;
                 }
             }
-            // Calculate per-chromosome averages for this chunk
             for (ref_name, region_coverage) in &local_coverage {
                 let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
                 if count > 0 {
@@ -179,31 +168,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             (local_coverage, local_averages)
-        });
-        handles.push(handle);
-    }
-    // Await all jobs and merge results
-    for handle in handles {
-        let (local_coverage, local_averages) = handle.await?;
-        {
-            let mut cov = coverage.lock().unwrap();
-            let cov: &mut HashMap<String, HashMap<u32, u32>> = &mut *cov;
-            for (ref_name, region_coverage) in local_coverage {
-                let entry: &mut HashMap<u32, u32> = cov.entry(ref_name).or_default();
-                for (pos, count) in region_coverage {
-                    *entry.entry(pos).or_insert(0) += count;
-                }
+        })
+        .collect();
+    // Merge results from all chunks
+    let mut coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+    let mut per_chrom_averages: Vec<f64> = Vec::new();
+    for (local_coverage, local_averages) in results {
+        for (ref_name, region_coverage) in local_coverage {
+            let entry = coverage.entry(ref_name).or_default();
+            for (pos, count) in region_coverage {
+                *entry.entry(pos).or_insert(0) += count;
             }
         }
-        {
-            let mut avgs = per_chrom_averages.lock().unwrap();
-            for (_ref_name, avg) in local_averages {
-                avgs.push(avg);
-            }
+        for (_ref_name, avg) in local_averages {
+            per_chrom_averages.push(avg);
         }
     }
-    let coverage = Arc::try_unwrap(coverage).unwrap().into_inner().unwrap();
-    let per_chrom_averages = Arc::try_unwrap(per_chrom_averages).unwrap().into_inner().unwrap();
 
     // Write per-position coverage to a file (TSV format)
     let mut out = File::create(&cli.output)?;
