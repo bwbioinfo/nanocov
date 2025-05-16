@@ -48,66 +48,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Determine number of threads
     let n_threads = cli.threads.unwrap_or_else(|| std::cmp::max(1, num_cpus::get() / 2));
     let chunk_size = (records.len() + n_threads - 1) / n_threads;
-    let coverage_results = futures::future::join_all(
-        records
-            .chunks(chunk_size)
-            .map(|chunk| {
-                let chunk = chunk.to_vec();
-                let ref_names = ref_names.clone();
-                let bed_regions = bed_regions.clone();
-                task::spawn_blocking(move || {
-                    let mut coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
-                    for record in chunk {
-                        if record.flags().is_unmapped() {
-                            continue;
-                        }
-                        let ref_id = match record.reference_sequence_id() {
-                            Some(Ok(id)) => id,
-                            _ => continue,
-                        };
-                        let ref_name = ref_names.get(ref_id)
-                            .map(|bstr| String::from_utf8_lossy(&bstr.to_vec()).into_owned())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        if let Some(ref regions) = bed_regions {
-                            if let Some(region_list) = regions.get(&ref_name) {
-                                let start = match record.alignment_start() {
-                                    Some(Ok(pos)) => pos.get() as u32,
-                                    _ => continue,
-                                };
-                                let len = record.cigar().len() as u32;
-                                let end = start + len;
-                                if !region_list.iter().any(|&(r_start, r_end)| start < r_end && end > r_start) {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        }
+
+    // Calculate per-chromosome coverage and average, then global average
+    use std::sync::{Arc, Mutex};
+    let coverage = Arc::new(Mutex::new(HashMap::new()));
+    let per_chrom_averages = Arc::new(Mutex::new(Vec::new()));
+
+    let mut handles = Vec::new();
+    for ref_name in &ref_names {
+        let ref_name = String::from_utf8_lossy(&ref_name.to_vec()).into_owned();
+        let records: Vec<_> = records.iter().filter(|rec| {
+            let rec_ref_id = match rec.reference_sequence_id() {
+                Some(Ok(id)) => id,
+                _ => return false,
+            };
+            ref_names.get(rec_ref_id)
+                .map(|bstr| String::from_utf8_lossy(&bstr.to_vec()).into_owned())
+                .unwrap_or_else(|| "unknown".to_string()) == ref_name
+        }).cloned().collect();
+        let bed_regions = bed_regions.clone();
+        let coverage = Arc::clone(&coverage);
+        let per_chrom_averages = Arc::clone(&per_chrom_averages);
+        let ref_name_clone = ref_name.clone();
+        let handle = std::thread::spawn(move || {
+            let mut chrom_coverage: HashMap<u32, u32> = HashMap::new();
+            for record in records {
+                if record.flags().is_unmapped() {
+                    continue;
+                }
+                if let Some(ref regions) = bed_regions {
+                    if let Some(region_list) = regions.get(&ref_name_clone) {
                         let start = match record.alignment_start() {
                             Some(Ok(pos)) => pos.get() as u32,
                             _ => continue,
                         };
                         let len = record.cigar().len() as u32;
-                        let region_coverage = coverage.entry(ref_name).or_default();
-                        for pos in start..start + len {
-                            *region_coverage.entry(pos).or_insert(0) += 1;
+                        let end = start + len;
+                        if !region_list.iter().any(|&(r_start, r_end)| start < r_end && end > r_start) {
+                            continue;
                         }
+                    } else {
+                        continue;
                     }
-                    coverage
-                })
-            })
-    ).await;
-
-    let mut coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
-    for result in coverage_results {
-        let partial = result?;
-        for (ref_name, region_coverage) in partial {
-            let entry = coverage.entry(ref_name).or_default();
-            for (pos, count) in region_coverage {
-                *entry.entry(pos).or_insert(0) += count;
+                }
+                let start = match record.alignment_start() {
+                    Some(Ok(pos)) => pos.get() as u32,
+                    _ => continue,
+                };
+                let len = record.cigar().len() as u32;
+                for pos in start..start + len {
+                    *chrom_coverage.entry(pos).or_insert(0) += 1;
+                }
             }
-        }
+            // Store per-chromosome coverage
+            {
+                let mut cov = coverage.lock().unwrap();
+                cov.insert(ref_name_clone.clone(), chrom_coverage.clone());
+            }
+            // Calculate and store per-chromosome average
+            let (total, count) = chrom_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+            if count > 0 {
+                let avg = total as f64 / count as f64;
+                let mut avgs = per_chrom_averages.lock().unwrap();
+                avgs.push(avg);
+            }
+        });
+        handles.push(handle);
     }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let coverage = Arc::try_unwrap(coverage).unwrap().into_inner().unwrap();
+    let per_chrom_averages = Arc::try_unwrap(per_chrom_averages).unwrap().into_inner().unwrap();
 
     // Write per-position coverage to a file
     let mut out = File::create(&cli.output)?;
@@ -120,18 +132,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Only print summary and average coverage to stdout
-    let mut total_coverage = 0u64;
-    let mut total_positions = 0u64;
-    for (_ref_name, region_coverage) in &coverage {
-        for (_pos, count) in region_coverage {
-            total_coverage += *count as u64;
-            total_positions += 1;
+    // Print per-chromosome averages and global average
+    if !per_chrom_averages.is_empty() {
+        for (ref_name, region_coverage) in &coverage {
+            let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+            if count > 0 {
+                let avg = total as f64 / count as f64;
+                println!("{} average coverage: {:.2}", ref_name, avg);
+            }
         }
-    }
-    if total_positions > 0 {
-        let avg_coverage = total_coverage as f64 / total_positions as f64;
-        println!("Average coverage: {:.2}", avg_coverage);
+        let global_avg = per_chrom_averages.iter().sum::<f64>() / per_chrom_averages.len() as f64;
+        println!("Global average coverage: {:.2}", global_avg);
     } else {
         println!("No coverage data found.");
     }
