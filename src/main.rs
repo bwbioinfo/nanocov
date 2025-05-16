@@ -46,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let records: Vec<_> = reader.records().collect::<Result<_, _>>()?;
     // Determine number of threads
     let n_threads = cli.threads.unwrap_or_else(|| std::cmp::max(1, num_cpus::get() / 2));
-    let chunk_size = (records.len() + n_threads - 1) / n_threads;
 
     // Calculate per-chromosome coverage and average, then global average
     use std::sync::{Arc, Mutex};
@@ -54,29 +53,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let per_chrom_averages = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
-    for ref_name in &ref_names {
-        let ref_name = String::from_utf8_lossy(&ref_name.to_vec()).into_owned();
-        let records: Vec<_> = records.iter().filter(|rec| {
-            let rec_ref_id = match rec.reference_sequence_id() {
-                Some(Ok(id)) => id,
-                _ => return false,
-            };
-            ref_names.get(rec_ref_id)
-                .map(|bstr| String::from_utf8_lossy(&bstr.to_vec()).into_owned())
-                .unwrap_or_else(|| "unknown".to_string()) == ref_name
-        }).cloned().collect();
+    for chunk in records.chunks(n_threads) {
+        let chunk = chunk.to_vec();
+        let ref_names = ref_names.clone();
         let bed_regions = bed_regions.clone();
-        let coverage = Arc::clone(&coverage);
-        let per_chrom_averages = Arc::clone(&per_chrom_averages);
-        let ref_name_clone = ref_name.clone();
-        let handle = std::thread::spawn(move || {
-            let mut chrom_coverage: HashMap<u32, u32> = HashMap::new();
-            for record in records {
+        let handle = tokio::spawn(async move {
+            let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+            let mut local_averages: HashMap<String, f64> = HashMap::new();
+            for record in chunk {
                 if record.flags().is_unmapped() {
                     continue;
                 }
+                let ref_id = match record.reference_sequence_id() {
+                    Some(Ok(id)) => id,
+                    _ => continue,
+                };
+                let ref_name = ref_names.get(ref_id)
+                    .map(|bstr| String::from_utf8_lossy(&bstr.to_vec()).into_owned())
+                    .unwrap_or_else(|| "unknown".to_string());
                 if let Some(ref regions) = bed_regions {
-                    if let Some(region_list) = regions.get(&ref_name_clone) {
+                    if let Some(region_list) = regions.get(&ref_name) {
                         let start = match record.alignment_start() {
                             Some(Ok(pos)) => pos.get() as u32,
                             _ => continue,
@@ -95,27 +91,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => continue,
                 };
                 let len = record.cigar().len() as u32;
+                let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
                 for pos in start..start + len {
-                    *chrom_coverage.entry(pos).or_insert(0) += 1;
+                    *region_coverage.entry(pos).or_insert(0) += 1;
                 }
             }
-            // Store per-chromosome coverage
-            {
-                let mut cov = coverage.lock().unwrap();
-                cov.insert(ref_name_clone.clone(), chrom_coverage.clone());
+            // Calculate per-chromosome averages for this chunk
+            for (ref_name, region_coverage) in &local_coverage {
+                let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+                if count > 0 {
+                    let avg = total as f64 / count as f64;
+                    local_averages.insert(ref_name.clone(), avg);
+                }
             }
-            // Calculate and store per-chromosome average
-            let (total, count) = chrom_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
-            if count > 0 {
-                let avg = total as f64 / count as f64;
-                let mut avgs = per_chrom_averages.lock().unwrap();
-                avgs.push(avg);
-            }
+            (local_coverage, local_averages)
         });
         handles.push(handle);
     }
+    // Await all jobs and merge results
     for handle in handles {
-        handle.join().unwrap();
+        let (local_coverage, local_averages) = handle.await?;
+        {
+            let mut cov = coverage.lock().unwrap();
+            let cov: &mut HashMap<String, HashMap<u32, u32>> = &mut *cov;
+            for (ref_name, region_coverage) in local_coverage {
+                let entry: &mut HashMap<u32, u32> = cov.entry(ref_name).or_default();
+                for (pos, count) in region_coverage {
+                    *entry.entry(pos).or_insert(0) += count;
+                }
+            }
+        }
+        {
+            let mut avgs = per_chrom_averages.lock().unwrap();
+            for (_ref_name, avg) in local_averages {
+                avgs.push(avg);
+            }
+        }
     }
     let coverage = Arc::try_unwrap(coverage).unwrap().into_inner().unwrap();
     let per_chrom_averages = Arc::try_unwrap(per_chrom_averages).unwrap().into_inner().unwrap();
