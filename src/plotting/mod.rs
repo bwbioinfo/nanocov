@@ -72,9 +72,12 @@ pub fn plot_per_base_coverage(
     // Configure the mesh (axes, grid, and labels)
     chart
         .configure_mesh()
-        .x_desc("Chromosome Position")
+        .x_desc("Chromosome Position (Mb)")
         .y_desc("Coverage")
         .axis_desc_style(("sans-serif", 25))
+        .x_label_formatter(&|x| format!("{:.2}", (*x as f64) / 1_000_000.0)) // Format x axis in Mb
+        .x_labels(20) // Increase number of x-axis ticks
+        .x_label_style(("sans-serif", 18))
         .draw()?;
 
     // Draw each bar as a filled rectangle from the current position to the next (or width 1 for the last)
