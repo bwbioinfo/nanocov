@@ -6,7 +6,9 @@ use crate::cli::Cli;
 // Functions for BAM/BED reading and coverage writing will be moved here from main.rs
 // (Implementations will be moved in the next step)
 
-pub fn run_coverage(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+use crate::utils::ReadStats;
+
+pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
@@ -29,112 +31,173 @@ pub fn run_coverage(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let coverage_results: Vec<(HashMap<String, HashMap<u32, u32>>, HashMap<String, f64>)> = if let Some(ref bed) = bed_regions {
-        // Collect all (chrom, region) pairs
-        let mut region_jobs = Vec::new();
-        for (chrom, regions) in bed.iter() {
-            for &(start, end) in regions {
-                region_jobs.push((chrom.clone(), start, end));
-            }
-        }
-        // Parallelize over regions
-        region_jobs.par_iter().map(|(chrom, start, end)| {
-            let mut reader = bam::io::Reader::new(BufReader::new(File::open(&cli.input).unwrap()));
-            let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&cli.input.with_extension("bam.bai")).unwrap());
-            let index = bai_reader.read_index().unwrap();
-            let header = reader.read_header().unwrap();
-            let reference_sequences = header.reference_sequences();
-            let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
-            let region = Region::new(
-                chrom.clone(),
-                Position::try_from((*start + 1) as usize).unwrap()..=Position::try_from(*end as usize).unwrap()
-            );
-            let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
-            let mut local_averages: HashMap<String, f64> = HashMap::new();
-            let query = reader.query(&header, &index, &region).unwrap();
-            for result in query {
-                let record = result.unwrap();
-                if record.flags().is_unmapped() {
-                    continue;
-                }
-                let ref_id = match record.reference_sequence_id() {
-                    Some(Ok(id)) => id,
-                    _ => continue,
-                };
-                let ref_name = ref_names.get(ref_id)
-                    .map(|name| name.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let start = match record.alignment_start() {
-                    Some(Ok(pos)) => pos.get() as u32,
-                    _ => continue,
-                };
-                let len = record.cigar().len() as u32;
-                let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
-                for pos in start..start + len {
-                    *region_coverage.entry(pos).or_insert(0) += 1;
-                }
-            }
-            for (ref_name, region_coverage) in &local_coverage {
-                let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
-                if count > 0 {
-                    let avg = total as f64 / count as f64;
-                    local_averages.insert(ref_name.clone(), avg);
-                }
-            }
-            (local_coverage, local_averages)
-        }).collect()
+    // Parse chrom_bed file if provided; returns Option<HashMap<String, Vec<(u32, u32)>>> mapping chrom to full ranges
+    let chrom_bed_regions = if let Some(chrom_bed_path) = &cli.chrom_bed {
+        Some(parse_bed(chrom_bed_path)?)
     } else {
-        // No BED: parallelize by chromosome
-        let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
-        let chrom_jobs: Vec<String> = ref_names.clone();
-        chrom_jobs.par_iter().map(|chrom| {
-            let mut reader = bam::io::Reader::new(BufReader::new(File::open(&cli.input).unwrap()));
-            let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&cli.input.with_extension("bam.bai")).unwrap());
-            let index = bai_reader.read_index().unwrap();
-            let header = reader.read_header().unwrap();
-            let reference_sequences = header.reference_sequences();
-            // Find the reference sequence for this chromosome
-            let ref_seq = reference_sequences.iter().find(|(k, _)| k.to_string() == *chrom).map(|(_, v)| v).unwrap();
-            let len = ref_seq.length();
-            let region = Region::new(
-                chrom.clone(),
-                Position::try_from(1usize).unwrap()..=Position::try_from(len.get()).unwrap()
-            );
-            let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
-            let mut local_averages: HashMap<String, f64> = HashMap::new();
-            let query = reader.query(&header, &index, &region).unwrap();
-            for result in query {
-                let record = result.unwrap();
-                if record.flags().is_unmapped() {
-                    continue;
-                }
-                let ref_id = match record.reference_sequence_id() {
-                    Some(Ok(id)) => id,
-                    _ => continue,
-                };
-                let ref_name = ref_names.get(ref_id)
-                    .map(|name| name.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let start = match record.alignment_start() {
-                    Some(Ok(pos)) => pos.get() as u32,
-                    _ => continue,
-                };
-                let len = record.cigar().len() as u32;
-                let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
-                for pos in start..start + len {
-                    *region_coverage.entry(pos).or_insert(0) += 1;
-                }
-            }
-            for (ref_name, region_coverage) in &local_coverage {
-                let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
-                if count > 0 {
-                    let avg = total as f64 / count as f64;
-                    local_averages.insert(ref_name.clone(), avg);
-                }
-            }
-            (local_coverage, local_averages)
-        }).collect()
+        None
     };
+
+    let coverage_results: Vec<(HashMap<String, HashMap<u32, u32>>, HashMap<String, f64>)> = 
+        if let Some(ref bed) = bed_regions {
+            // Collect all (chrom, region) pairs
+            let mut region_jobs = Vec::new();
+            for (chrom, regions) in bed.iter() {
+                for &(start, end) in regions {
+                    region_jobs.push((chrom.clone(), start, end));
+                }
+            }
+            // Parallelize over regions
+            region_jobs.par_iter().map(|(chrom, start, end)| {
+                let mut reader = bam::io::Reader::new(BufReader::new(File::open(&cli.input).unwrap()));
+                let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&cli.input.with_extension("bam.bai")).unwrap());
+                let index = bai_reader.read_index().unwrap();
+                let header = reader.read_header().unwrap();
+                let reference_sequences = header.reference_sequences();
+                let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
+                let region = Region::new(
+                    chrom.clone(),
+                    Position::try_from((*start + 1) as usize).unwrap()..=Position::try_from(*end as usize).unwrap()
+                );
+                let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+                let mut local_averages: HashMap<String, f64> = HashMap::new();
+                let query = reader.query(&header, &index, &region).unwrap();
+                for result in query {
+                    let record = result.unwrap();
+                    if record.flags().is_unmapped() {
+                        continue;
+                    }
+                    let ref_id = match record.reference_sequence_id() {
+                        Some(Ok(id)) => id,
+                        _ => continue,
+                    };
+                    let ref_name = ref_names.get(ref_id)
+                        .map(|name| name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let start = match record.alignment_start() {
+                        Some(Ok(pos)) => pos.get() as u32,
+                        _ => continue,
+                    };
+                    let len = record.cigar().len() as u32;
+                    let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
+                    for pos in start..start + len {
+                        *region_coverage.entry(pos).or_insert(0) += 1;
+                    }
+                }
+                for (ref_name, region_coverage) in &local_coverage {
+                    let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+                    if count > 0 {
+                        let avg = total as f64 / count as f64;
+                        local_averages.insert(ref_name.clone(), avg);
+                    }
+                }
+                (local_coverage, local_averages)
+            }).collect()
+        } else if let Some(ref chrom_bed) = chrom_bed_regions {
+            // Use full chromosome ranges from chrom_bed
+            let mut chrom_jobs = Vec::new();
+            for (chrom, regions) in chrom_bed.iter() {
+                for &(start, end) in regions {
+                    chrom_jobs.push((chrom.clone(), start, end));
+                }
+            }
+            chrom_jobs.par_iter().map(|(chrom, start, end)| {
+                let mut reader = bam::io::Reader::new(BufReader::new(File::open(&cli.input).unwrap()));
+                let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&cli.input.with_extension("bam.bai")).unwrap());
+                let index = bai_reader.read_index().unwrap();
+                let header = reader.read_header().unwrap();
+                let reference_sequences = header.reference_sequences();
+                let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
+                let region = Region::new(
+                    chrom.clone(),
+                    Position::try_from((*start + 1) as usize).unwrap()..=Position::try_from(*end as usize).unwrap()
+                );
+                let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+                let mut local_averages: HashMap<String, f64> = HashMap::new();
+                let query = reader.query(&header, &index, &region).unwrap();
+                for result in query {
+                    let record = result.unwrap();
+                    if record.flags().is_unmapped() {
+                        continue;
+                    }
+                    let ref_id = match record.reference_sequence_id() {
+                        Some(Ok(id)) => id,
+                        _ => continue,
+                    };
+                    let ref_name = ref_names.get(ref_id)
+                        .map(|name| name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let start = match record.alignment_start() {
+                        Some(Ok(pos)) => pos.get() as u32,
+                        _ => continue,
+                    };
+                    let len = record.cigar().len() as u32;
+                    let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
+                    for pos in start..start + len {
+                        *region_coverage.entry(pos).or_insert(0) += 1;
+                    }
+                }
+                for (ref_name, region_coverage) in &local_coverage {
+                    let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+                    if count > 0 {
+                        let avg = total as f64 / count as f64;
+                        local_averages.insert(ref_name.clone(), avg);
+                    }
+                }
+                (local_coverage, local_averages)
+            }).collect()
+        } else {
+            // No BED: parallelize by chromosome
+            let ref_names: Vec<String> = reference_sequences.keys().map(|b| b.to_string()).collect();
+            let chrom_jobs: Vec<String> = ref_names.clone();
+            chrom_jobs.par_iter().map(|chrom| {
+                let mut reader = bam::io::Reader::new(BufReader::new(File::open(&cli.input).unwrap()));
+                let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&cli.input.with_extension("bam.bai")).unwrap());
+                let index = bai_reader.read_index().unwrap();
+                let header = reader.read_header().unwrap();
+                let reference_sequences = header.reference_sequences();
+                // Find the reference sequence for this chromosome
+                let ref_seq = reference_sequences.iter().find(|(k, _)| k.to_string() == *chrom).map(|(_, v)| v).unwrap();
+                let len = ref_seq.length();
+                let region = Region::new(
+                    chrom.clone(),
+                    Position::try_from(1usize).unwrap()..=Position::try_from(len.get()).unwrap()
+                );
+                let mut local_coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+                let mut local_averages: HashMap<String, f64> = HashMap::new();
+                let query = reader.query(&header, &index, &region).unwrap();
+                for result in query {
+                    let record = result.unwrap();
+                    if record.flags().is_unmapped() {
+                        continue;
+                    }
+                    let ref_id = match record.reference_sequence_id() {
+                        Some(Ok(id)) => id,
+                        _ => continue,
+                    };
+                    let ref_name = ref_names.get(ref_id)
+                        .map(|name| name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let start = match record.alignment_start() {
+                        Some(Ok(pos)) => pos.get() as u32,
+                        _ => continue,
+                    };
+                    let len = record.cigar().len() as u32;
+                    let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
+                    for pos in start..start + len {
+                        *region_coverage.entry(pos).or_insert(0) += 1;
+                    }
+                }
+                for (ref_name, region_coverage) in &local_coverage {
+                    let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+                    if count > 0 {
+                        let avg = total as f64 / count as f64;
+                        local_averages.insert(ref_name.clone(), avg);
+                    }
+                }
+                (local_coverage, local_averages)
+            }).collect()
+        };
 
     // Merge results from all jobs
     let mut coverage: HashMap<String, HashMap<u32, u32>> = HashMap::new();
@@ -184,8 +247,40 @@ pub fn run_coverage(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} average coverage: {:.2}", ref_name, avg);
             }
             // Call plotting for each chromosome
-            let plot_path = format!("coverage.{}.png", ref_name);
-            crate::plotting::plot_per_base_coverage(ref_name, region_coverage, &plot_path)?;
+            let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
+            let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let plot_path = output_dir.join(format!("{}.{}.png", output_stem, ref_name));
+            // Determine plot range: chrom_bed > bed > coverage
+            let (plot_start, plot_end) = if let Some(ref chrom_bed) = chrom_bed_regions {
+                if let Some(regions) = chrom_bed.get(ref_name) {
+                    let min_start = regions.iter().map(|(s, _)| *s).min().unwrap_or(0);
+                    let max_end = regions.iter().map(|(_, e)| *e).max().unwrap_or(0);
+                    (min_start, max_end)
+                } else {
+                    (0, 0)
+                }
+            } else if let Some(ref bed) = bed_regions {
+                if let Some(regions) = bed.get(ref_name) {
+                    let min_start = regions.iter().map(|(s, _)| *s).min().unwrap_or(0);
+                    let max_end = regions.iter().map(|(_, e)| *e).max().unwrap_or(0);
+                    (min_start, max_end)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                // fallback to coverage min/max if no BED
+                let min_pos = region_coverage.keys().min().copied().unwrap_or(0);
+                let max_pos = region_coverage.keys().max().copied().unwrap_or(0);
+                (min_pos, max_pos)
+            };
+            crate::plotting::plot_per_base_coverage_with_range(
+                ref_name,
+                region_coverage,
+                plot_path.to_str().unwrap(),
+                plot_start,
+                plot_end,
+                read_stats.as_ref(),
+            )?;
         }
         let global_avg = per_chrom_averages.iter().sum::<f64>() / per_chrom_averages.len() as f64;
         println!("Global average coverage: {:.2}", global_avg);

@@ -18,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Move coverage calculation and output logic to io module
-    io::run_coverage(&cli)?;
+    // Extract read stats
+    let read_stats = crate::utils::extract_read_stats(bam_path)?;
+
+    // Move coverage calculation and output logic to io module, pass read_stats
+    io::run_coverage(&cli, Some(read_stats))?;
     Ok(())
 }

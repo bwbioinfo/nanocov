@@ -17,6 +17,10 @@ pub struct Cli {
     #[arg(short = 'b', long = "bed")]
     pub bed: Option<PathBuf>,
 
+    /// BED file with full chromosome ranges (chrom, start, end for each chromosome)
+    #[arg(long = "chrom-bed")]
+    pub chrom_bed: Option<PathBuf>,
+
     /// Number of threads to use (default: half of available cores)
     #[arg(short = 't', long = "threads")]
     pub threads: Option<usize>,
