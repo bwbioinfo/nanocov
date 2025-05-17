@@ -5,6 +5,8 @@
 const CAT_BLUE: RGBColor = RGBColor(30, 102, 245); // Blue
 const CAT_MAUVE: RGBColor = RGBColor(136, 57, 239); // Mauve
 const CAT_GREEN: RGBColor = RGBColor(64, 160, 43); // Green
+const CAT_YELLOW: RGBColor = RGBColor(223, 142, 29); // Yellow
+const CAT_PINK: RGBColor = RGBColor(221, 120, 120); // Pink
 const CAT_BASE: RGBColor = RGBColor(239, 241, 245); // Base (background)
 const CAT_OVERLAY: RGBColor = RGBColor(220, 224, 232); // Overlay (box)
 const CAT_TEXT: RGBColor = RGBColor(76, 79, 105); // Text
@@ -150,12 +152,16 @@ pub fn plot_per_base_coverage_with_range(
         .color(&CAT_TEXT);
     let padding = 30;
     let line_height = 32;
-    let box_width = 400;
-    let box_height = ((6 * line_height + padding * 2) as f32 * 1.1) as i32; // 1 title + 5 stats, 10% more space
+    let box_width = (400.0 * 1.1) as i32;
+    let box_height = (6 * line_height + padding * 2) as i32;
+    let num_boxes = 3;
+    let spacing = 40;
+    let total_boxes_height = num_boxes * box_height + (num_boxes - 1) * spacing;
+    let available_height = 1000;
     let box_x = 30;
-    let box_y_top = 40;
-    let box_y_bottom = box_y_top + box_height + 40;
-
+    let box_y_top = (available_height - total_boxes_height) / 2;
+    let box_y_bottom = box_y_top + box_height + spacing;
+    let per_base_box_y = box_y_bottom + box_height + spacing;
     // --- Top box: Read stats ---
     if let Some(stats) = read_stats {
         let stats_labels = [
@@ -208,7 +214,7 @@ pub fn plot_per_base_coverage_with_range(
                 value,
                 &font,
                 (
-                    box_x + box_width - padding - 60,
+                    box_x + box_width - padding - 160,
                     box_y_top + padding + ((i as i32 + 1) * line_height),
                 ),
             )?;
@@ -262,7 +268,7 @@ pub fn plot_per_base_coverage_with_range(
             (box_x + box_width, box_y_bottom + box_height),
         ],
         ShapeStyle {
-            color: CAT_MAUVE.to_rgba(),
+            color: CAT_GREEN.to_rgba(),
             filled: false,
             stroke_width: 3,
         },
@@ -285,7 +291,7 @@ pub fn plot_per_base_coverage_with_range(
             value,
             &font,
             (
-                box_x + box_width - padding - 60,
+                box_x + box_width - padding - 160,
                 box_y_bottom + padding + ((i as i32 + 1) * line_height),
             ),
         )?;
@@ -337,7 +343,6 @@ pub fn plot_per_base_coverage_with_range(
         format!("{:.2}", per_base_stddev),
     ];
 
-    let per_base_box_y = box_y_bottom + box_height + 40;
     left_panel.draw(&Rectangle::new(
         [
             (box_x, per_base_box_y),
@@ -355,7 +360,7 @@ pub fn plot_per_base_coverage_with_range(
             (box_x + box_width, per_base_box_y + box_height),
         ],
         ShapeStyle {
-            color: CAT_MAUVE.to_rgba(),
+            color: CAT_PINK.to_rgba(),
             filled: false,
             stroke_width: 3,
         },
@@ -382,7 +387,7 @@ pub fn plot_per_base_coverage_with_range(
             value,
             &font,
             (
-                box_x + box_width - padding - 60,
+                box_x + box_width - padding - 160,
                 per_base_box_y + padding + ((i as i32 + 1) * line_height),
             ),
         )?;
