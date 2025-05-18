@@ -14,7 +14,7 @@ pub struct ReadStats {
 
 pub fn extract_read_stats(bam_path: &std::path::Path) -> Result<ReadStats, Box<dyn std::error::Error>> {
     let mut reader = bam::io::Reader::new(BufReader::new(File::open(bam_path)?));
-    let header = reader.read_header()?;
+    let _header = reader.read_header()?;
     let mut lengths = Vec::new();
     let mut quals = Vec::new();
 

@@ -32,4 +32,20 @@ pub struct Cli {
     /// Chunk size for parallel processing (default: 10,000)
     #[arg(short = 'c', long = "chunk-size", default_value_t = 10_000)]
     pub chunk_size: usize,
+    
+    /// Use SVG output format for plots instead of PNG
+    #[arg(long = "svg")]
+    pub svg_output: bool,
+    
+    /// Color theme for plots [latte, frappe, nord, gruvbox]
+    #[arg(long = "theme")]
+    pub theme: Option<String>,
+    
+    /// Show regions with zero coverage in plots
+    #[arg(long = "show-zeros")]
+    pub show_zero_regions: bool,
+    
+    /// Skip plotting (generate only TSV output)
+    #[arg(long = "no-plot")]
+    pub skip_plotting: bool,
 }

@@ -249,7 +249,16 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
             // Call plotting for each chromosome
             let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
             let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let plot_path = output_dir.join(format!("{}.{}.png", output_stem, ref_name));
+            
+            // Determine output format - support both PNG and SVG
+            let file_format = if cli.svg_output {
+                "svg"
+            } else {
+                "png"
+            };
+            
+            let plot_path = output_dir.join(format!("{}.{}.{}", output_stem, ref_name, file_format));
+            
             // Determine plot range: chrom_bed > bed > coverage
             let (plot_start, plot_end) = if let Some(ref chrom_bed) = chrom_bed_regions {
                 if let Some(regions) = chrom_bed.get(ref_name) {
@@ -273,6 +282,12 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
                 let max_pos = region_coverage.keys().max().copied().unwrap_or(0);
                 (min_pos, max_pos)
             };
+            
+            // Apply theme if specified
+            if let Some(theme) = &cli.theme {
+                crate::plotting::set_theme(theme);
+            }
+            
             crate::plotting::plot_per_base_coverage_with_range(
                 ref_name,
                 region_coverage,
@@ -280,6 +295,7 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
                 plot_start,
                 plot_end,
                 read_stats.as_ref(),
+                cli.show_zero_regions,
             )?;
         }
         let global_avg = per_chrom_averages.iter().sum::<f64>() / per_chrom_averages.len() as f64;
