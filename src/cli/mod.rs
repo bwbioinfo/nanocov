@@ -48,4 +48,12 @@ pub struct Cli {
     /// Skip plotting (generate only TSV output)
     #[arg(long = "no-plot")]
     pub skip_plotting: bool,
+    
+    /// Skip multi-chromosome summary plot
+    #[arg(long = "no-multi-plot")]
+    pub skip_multi_plot: bool,
+    
+    /// Use logarithmic scale for the multi-chromosome plot
+    #[arg(long = "log-scale")]
+    pub log_scale: bool,
 }

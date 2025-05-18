@@ -4,10 +4,14 @@
 mod themes;
 mod stats;
 mod utils;
+mod multi_chrom;
 
 use themes::{ColorTheme, CATPPUCCIN_LATTE, CATPPUCCIN_FRAPPE, NORD, GRUVBOX_LIGHT};
 use stats::{calculate_coverage_stats, calculate_per_base_stats};
 use utils::format_number;
+
+// Re-export multi-chromosome plotting functionality
+pub use multi_chrom::plot_all_chromosomes;
 
 // Default theme (can be overridden via CLI)
 pub static mut CURRENT_THEME: &'static ColorTheme = &CATPPUCCIN_LATTE;
@@ -616,6 +620,8 @@ pub fn plot_per_base_coverage_with_range(
     Ok(())
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +643,8 @@ mod tests {
         let meta = fs::metadata(out_path).unwrap();
         assert!(meta.len() > 0, "Output PNG should not be empty");
     }
+    
+
     
     #[test]
     fn test_plot_per_base_coverage_with_different_themes() {

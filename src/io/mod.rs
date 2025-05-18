@@ -240,11 +240,15 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
 
     // Print per-chromosome averages and global average to stdout
     if !per_chrom_averages.is_empty() {
+        // Create a HashMap for multi-chromosome plotting
+        let mut chrom_coverages: HashMap<String, &HashMap<u32, u32>> = HashMap::new();
+        
         for (ref_name, region_coverage) in &coverage {
             let (total, count) = region_coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
             if count > 0 {
                 let avg = total as f64 / count as f64;
                 println!("{} average coverage: {:.2}", ref_name, avg);
+                chrom_coverages.insert(ref_name.clone(), region_coverage);
             }
             // Call plotting for each chromosome
             let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
@@ -300,6 +304,29 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
         }
         let global_avg = per_chrom_averages.iter().sum::<f64>() / per_chrom_averages.len() as f64;
         println!("Global average coverage: {:.2}", global_avg);
+        
+        // Generate multi-chromosome plot if we have data from multiple chromosomes
+        if chrom_coverages.len() > 1 && !cli.skip_plotting && !cli.skip_multi_plot {
+            let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
+            let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
+            
+            // Get current theme
+            let theme = unsafe { crate::plotting::CURRENT_THEME };
+            
+            // Plot with appropriate scale based on CLI option
+            let plot_path = output_dir.join(format!("{}.multi_chrom.png", output_stem));
+            crate::plotting::plot_all_chromosomes(
+                &chrom_coverages,
+                plot_path.to_str().unwrap(),
+                cli.log_scale, // Use log scale if requested
+                read_stats.as_ref(),
+                theme,
+            )?;
+            
+            println!("Generated multi-chromosome plot ({}): {}", 
+                if cli.log_scale { "log scale" } else { "linear scale" }, 
+                plot_path.display());
+        }
     } else {
         println!("No coverage data found.");
     }
