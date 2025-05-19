@@ -10,6 +10,9 @@ pub struct ReadStats {
     pub median_len: f64,
     pub mean_qual: f64,
     pub median_qual: f64,
+    pub num_reads: u64,
+    pub num_bases: u64,
+    pub lengths: Option<Vec<u32>>,
 }
 
 pub fn extract_read_stats(bam_path: &std::path::Path) -> Result<ReadStats, Box<dyn std::error::Error>> {
@@ -17,11 +20,15 @@ pub fn extract_read_stats(bam_path: &std::path::Path) -> Result<ReadStats, Box<d
     let _header = reader.read_header()?;
     let mut lengths = Vec::new();
     let mut quals = Vec::new();
+    let mut num_reads: u64 = 0;
+    let mut num_bases: u64 = 0;
 
     for result in reader.records() {
         let record = result?;
         let len = record.sequence().len() as u32;
         lengths.push(len);
+        num_reads += 1;
+        num_bases += len as u64;
 
         // Collect mean quality per read (if available)
         let qual = record.quality_scores();
@@ -79,6 +86,9 @@ pub fn extract_read_stats(bam_path: &std::path::Path) -> Result<ReadStats, Box<d
         median_len,
         mean_qual,
         median_qual,
+        num_reads,
+        num_bases,
+        lengths: Some(lengths),
     })
 }
 // Utility functions for nanocov

@@ -1,6 +1,8 @@
 // src/io/mod.rs
 // IO module for nanocov: BAM/BED reading, coverage writing
 
+pub mod cramino;
+
 use crate::cli::Cli;
 
 // Functions for BAM/BED reading and coverage writing will be moved here from main.rs

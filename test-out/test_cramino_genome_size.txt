@@ -1,0 +1,14 @@
+File name	small-test-phased.bam
+Number of alignments	8105
+% from total alignments	100.00
+Number of reads	8105
+Yield [Gb]	0.08
+Mean coverage	27.69
+Yield [Gb] (>25kb)	0.03
+N50	21159
+N75	11525
+Median length	6049.00
+Mean length	10248.81
+
+Path	test-data/small-test-phased.bam
+Creation time	16/05/2025 17:55:18

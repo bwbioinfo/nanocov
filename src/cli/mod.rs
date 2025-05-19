@@ -56,4 +56,16 @@ pub struct Cli {
     /// Use logarithmic scale for the multi-chromosome plot
     #[arg(long = "log-scale")]
     pub log_scale: bool,
+    
+    /// Generate cramino-like output (in addition to regular output)
+    #[arg(long = "cramino")]
+    pub cramino_output: bool,
+    
+    /// Path for cramino-like output file (default: uses input filename with .cramino extension)
+    #[arg(long = "cramino-output")]
+    pub cramino_output_path: Option<PathBuf>,
+    
+    /// Genome size in base pairs (used for coverage calculation in cramino output)
+    #[arg(long = "genome-size")]
+    pub genome_size: Option<u64>,
 }

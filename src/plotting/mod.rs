@@ -1,13 +1,13 @@
 // src/plotting/mod.rs
 // Plotting module for nanocov - handles coverage visualization and statistics display
 
-mod themes;
-mod stats;
-mod utils;
 mod multi_chrom;
+mod stats;
+mod themes;
+mod utils;
 
-use themes::{ColorTheme, CATPPUCCIN_LATTE, CATPPUCCIN_FRAPPE, NORD, GRUVBOX_LIGHT};
 use stats::{calculate_coverage_stats, calculate_per_base_stats};
+use themes::{CATPPUCCIN_FRAPPE, CATPPUCCIN_LATTE, ColorTheme, GRUVBOX_LIGHT, NORD};
 use utils::format_number;
 
 // Re-export multi-chromosome plotting functionality
@@ -47,7 +47,7 @@ use std::collections::HashMap;
 use crate::utils::ReadStats;
 
 /// Set the global color theme for all plots
-/// 
+///
 /// # Arguments
 /// * `theme_name` - One of: "latte", "frappe", "nord", "gruvbox"
 #[inline]
@@ -76,18 +76,24 @@ pub fn plot_per_base_coverage(
     // Use the min/max of coverage as the range
     let mut positions: Vec<u32> = coverage.keys().copied().collect();
     positions.sort_unstable();
-    
+
     if positions.is_empty() {
         eprintln!("Warning: No coverage data for chromosome {}", chrom);
         return Ok(());
     }
-    
+
     let min_x = positions.iter().min().copied().unwrap_or(0);
     let max_x = positions.iter().max().copied().unwrap_or(0);
-    plot_per_base_coverage_with_range(chrom, coverage, output_path, min_x, max_x, read_stats, show_zero_regions)
+    plot_per_base_coverage_with_range(
+        chrom,
+        coverage,
+        output_path,
+        min_x,
+        max_x,
+        read_stats,
+        show_zero_regions,
+    )
 }
-
-
 
 pub fn plot_per_base_coverage_with_range(
     chrom: &str,
@@ -103,15 +109,15 @@ pub fn plot_per_base_coverage_with_range(
     let bin_size = if range > 100_000_000 {
         1_000_000 // 1Mb bins for very large regions (>100Mb)
     } else if range > 10_000_000 {
-        100_000   // 100kb bins for large regions (>10Mb)
+        100_000 // 100kb bins for large regions (>10Mb)
     } else if range > 1_000_000 {
-        10_000    // 10kb bins for medium regions (>1Mb)
+        10_000 // 10kb bins for medium regions (>1Mb)
     } else if range > 100_000 {
-        1_000     // 1kb bins for smaller regions (>100kb)
+        1_000 // 1kb bins for smaller regions (>100kb)
     } else if range > 10_000 {
-        100       // 100bp bins for tiny regions (>10kb)
+        100 // 100bp bins for tiny regions (>10kb)
     } else {
-        1         // No binning for very small regions
+        1 // No binning for very small regions
     };
 
     let mut binned: std::collections::BTreeMap<u32, (u64, u32)> = std::collections::BTreeMap::new();
@@ -134,7 +140,7 @@ pub fn plot_per_base_coverage_with_range(
         // Create a more complete dataset with zero regions
         let mut full_points = Vec::new();
         let mut last_pos = plot_start;
-        
+
         for &(pos, coverage) in &chrom_points {
             // Add zeros for any gaps
             if pos as u32 > last_pos + bin_size {
@@ -164,13 +170,13 @@ pub fn plot_per_base_coverage_with_range(
     } else {
         (y_max * 1.05).ceil() // 5% headroom for large values
     };
-    
+
     // Debug output
     eprintln!("[DEBUG] Max coverage for {}: {}", chrom, y_max);
 
     // Set up the drawing area with BitMapBackend (PNG output)
     let root = BitMapBackend::new(output_path, (2200, 1000)).into_drawing_area();
-    
+
     root.fill(&theme().base)?;
 
     // Split horizontally: left panel (stats), middle panel (main plot), right panel (scale bars)
@@ -224,34 +230,40 @@ pub fn plot_per_base_coverage_with_range(
         } else {
             x + bin_size as i64
         };
-        
+
         // Color gradient based on coverage level
         let fill_color = if y <= y_max * 0.3 {
             // Low coverage: blend from low coverage color to main color
             let blend_factor = (y / (y_max * 0.3)) as f64;
             let blend_factor = blend_factor.max(0.0).min(1.0);
             RGBColor(
-                ((theme().low.0 as f64) * (1.0 - blend_factor) + (theme().primary.0 as f64) * blend_factor) as u8,
-                ((theme().low.1 as f64) * (1.0 - blend_factor) + (theme().primary.1 as f64) * blend_factor) as u8,
-                ((theme().low.2 as f64) * (1.0 - blend_factor) + (theme().primary.2 as f64) * blend_factor) as u8,
+                ((theme().low.0 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.0 as f64) * blend_factor) as u8,
+                ((theme().low.1 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.1 as f64) * blend_factor) as u8,
+                ((theme().low.2 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.2 as f64) * blend_factor) as u8,
             )
         } else if y >= y_max * 0.7 {
             // High coverage: blend from main color to high coverage color
             let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
             let blend_factor = blend_factor.max(0.0).min(1.0);
             RGBColor(
-                ((theme().primary.0 as f64) * (1.0 - blend_factor) + (theme().high.0 as f64) * blend_factor) as u8,
-                ((theme().primary.1 as f64) * (1.0 - blend_factor) + (theme().high.1 as f64) * blend_factor) as u8,
-                ((theme().primary.2 as f64) * (1.0 - blend_factor) + (theme().high.2 as f64) * blend_factor) as u8,
+                ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                    + (theme().high.0 as f64) * blend_factor) as u8,
+                ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                    + (theme().high.1 as f64) * blend_factor) as u8,
+                ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                    + (theme().high.2 as f64) * blend_factor) as u8,
             )
         } else {
             // Medium coverage: use main color
             theme().primary
         };
-        
+
         Rectangle::new([(x, 0.0), (bar_end, y)], fill_color.filled())
     }))?;
-    
+
     // Draw the last bar if only one point or for the last position
     if let Some(&(x, y)) = chrom_points.last() {
         // Apply same color logic for last bar
@@ -259,28 +271,34 @@ pub fn plot_per_base_coverage_with_range(
             let blend_factor = (y / (y_max * 0.3)) as f64;
             let blend_factor = blend_factor.max(0.0).min(1.0);
             RGBColor(
-                ((theme().low.0 as f64) * (1.0 - blend_factor) + (theme().primary.0 as f64) * blend_factor) as u8,
-                ((theme().low.1 as f64) * (1.0 - blend_factor) + (theme().primary.1 as f64) * blend_factor) as u8,
-                ((theme().low.2 as f64) * (1.0 - blend_factor) + (theme().primary.2 as f64) * blend_factor) as u8,
+                ((theme().low.0 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.0 as f64) * blend_factor) as u8,
+                ((theme().low.1 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.1 as f64) * blend_factor) as u8,
+                ((theme().low.2 as f64) * (1.0 - blend_factor)
+                    + (theme().primary.2 as f64) * blend_factor) as u8,
             )
         } else if y >= y_max * 0.7 {
             let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
             let blend_factor = blend_factor.max(0.0).min(1.0);
             RGBColor(
-                ((theme().primary.0 as f64) * (1.0 - blend_factor) + (theme().high.0 as f64) * blend_factor) as u8,
-                ((theme().primary.1 as f64) * (1.0 - blend_factor) + (theme().high.1 as f64) * blend_factor) as u8,
-                ((theme().primary.2 as f64) * (1.0 - blend_factor) + (theme().high.2 as f64) * blend_factor) as u8,
+                ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                    + (theme().high.0 as f64) * blend_factor) as u8,
+                ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                    + (theme().high.1 as f64) * blend_factor) as u8,
+                ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                    + (theme().high.2 as f64) * blend_factor) as u8,
             )
         } else {
             theme().primary
         };
-        
+
         chart.draw_series(std::iter::once(Rectangle::new(
             [(x, 0.0), (x + bin_size as i64, y)],
             fill_color.filled(),
         )))?;
     }
-    
+
     // Add threshold line if average coverage is available
     let y_vals: Vec<f64> = chrom_points.iter().map(|&(_, y)| y).collect();
     if !y_vals.is_empty() {
@@ -292,70 +310,30 @@ pub fn plot_per_base_coverage_with_range(
     }
 
     // --- Apply annotations and legends in the right panel ---
-    
+
     // Fill the right panel with the base color
     right_panel.fill(&theme().base)?;
-    
+
     // Define scale bar dimensions
     let scale_box_width = 80;
     let scale_box_height = 30;
     let scale_spacing = 15;
     let padding = 30;
     let text_offset = 100;
-    
-    // Add title for scale panel
-    right_panel.draw_text(
-        "Coverage Scale",
-        &("sans-serif", 24).into_font().style(FontStyle::Bold).color(&theme().text),
-        (padding, padding + 20)
-    )?;
-    
-    // Create gradient boxes for scale
-    // High coverage
-    right_panel.draw(&Rectangle::new(
-        [(padding, padding + 80), (padding + scale_box_width, padding + 80 + scale_box_height)],
-        theme().high.filled()
-    ))?;
-    right_panel.draw_text(
-        "High",
-        &("sans-serif", 20).into_font().color(&theme().text),
-        (padding + text_offset, padding + 80 + 20)
-    )?;
-    
-    // Medium coverage
-    right_panel.draw(&Rectangle::new(
-        [(padding, padding + 80 + scale_box_height + scale_spacing), 
-         (padding + scale_box_width, padding + 80 + 2*scale_box_height + scale_spacing)],
-        theme().primary.filled()
-    ))?;
-    right_panel.draw_text(
-        "Medium",
-        &("sans-serif", 20).into_font().color(&theme().text),
-        (padding + text_offset, padding + 80 + scale_box_height + scale_spacing + 20)
-    )?;
-    
-    // Low coverage
-    right_panel.draw(&Rectangle::new(
-        [(padding, padding + 80 + 2*scale_box_height + 2*scale_spacing), 
-         (padding + scale_box_width, padding + 80 + 3*scale_box_height + 2*scale_spacing)],
-        theme().low.filled()
-    ))?;
-    right_panel.draw_text(
-        "Low",
-        &("sans-serif", 20).into_font().color(&theme().text),
-        (padding + text_offset, padding + 80 + 2*scale_box_height + 2*scale_spacing + 20)
-    )?;
-    
+
     // Add color gradient box
     let gradient_height = 200;
-    let gradient_start_y = padding + 80 + 3*scale_box_height + 3*scale_spacing + 20;
-    
+    let gradient_start_y = padding + 80 + 3 * scale_box_height + 3 * scale_spacing + 20;
+
     right_panel.draw_text(
-        "Color Gradient",
-        &("sans-serif", 24).into_font().style(FontStyle::Bold).color(&theme().text),
-        (padding, gradient_start_y)
+        "Coverage Scale",
+        &("sans-serif", 24)
+            .into_font()
+            .style(FontStyle::Bold)
+            .color(&theme().text),
+        (padding, gradient_start_y),
     )?;
-    
+
     // Draw color gradient
     for i in 0..gradient_height {
         let factor = (gradient_height - i) as f64 / gradient_height as f64;
@@ -371,38 +349,50 @@ pub fn plot_per_base_coverage_with_range(
             // Medium to high transition
             let blend = (factor - 0.66) / 0.34;
             RGBColor(
-                ((theme().primary.0 as f64) * (1.0 - blend) + (theme().high.0 as f64) * blend) as u8,
-                ((theme().primary.1 as f64) * (1.0 - blend) + (theme().high.1 as f64) * blend) as u8,
-                ((theme().primary.2 as f64) * (1.0 - blend) + (theme().high.2 as f64) * blend) as u8,
+                ((theme().primary.0 as f64) * (1.0 - blend) + (theme().high.0 as f64) * blend)
+                    as u8,
+                ((theme().primary.1 as f64) * (1.0 - blend) + (theme().high.1 as f64) * blend)
+                    as u8,
+                ((theme().primary.2 as f64) * (1.0 - blend) + (theme().high.2 as f64) * blend)
+                    as u8,
             )
         } else {
             // Medium range
             theme().primary
         };
-        
+
         right_panel.draw(&PathElement::new(
-            vec![(padding, gradient_start_y + 40 + i), (padding + scale_box_width, gradient_start_y + 40 + i)],
+            vec![
+                (padding, gradient_start_y + 40 + i),
+                (padding + scale_box_width, gradient_start_y + 40 + i),
+            ],
             color.stroke_width(1),
         ))?;
     }
-    
+
     // Add labels for gradient
     right_panel.draw_text(
         "High",
         &("sans-serif", 16).into_font().color(&theme().text),
-        (padding + text_offset, gradient_start_y + 40)
+        (padding + text_offset, gradient_start_y + 40),
     )?;
-    
+
     right_panel.draw_text(
         "Medium",
         &("sans-serif", 16).into_font().color(&theme().text),
-        (padding + text_offset, gradient_start_y + 40 + gradient_height/2)
+        (
+            padding + text_offset,
+            gradient_start_y + 40 + gradient_height / 2,
+        ),
     )?;
-    
+
     right_panel.draw_text(
         "Low",
         &("sans-serif", 16).into_font().color(&theme().text),
-        (padding + text_offset, gradient_start_y + 40 + gradient_height - 20)
+        (
+            padding + text_offset,
+            gradient_start_y + 40 + gradient_height - 20,
+        ),
     )?;
 
     // --- Draw read stats and coverage stats panels on the left ---
@@ -438,7 +428,7 @@ pub fn plot_per_base_coverage_with_range(
             format_number(stats.mean_len as u64),
             format_number(stats.median_len as u64),
         ];
-        
+
         // Draw box background and border
         left_panel.draw(&Rectangle::new(
             [
@@ -462,7 +452,7 @@ pub fn plot_per_base_coverage_with_range(
                 stroke_width: 3,
             },
         ))?;
-        
+
         // Draw title and stats
         left_panel.draw_text("Read Stats", &font, (box_x + padding, box_y_top + padding))?;
         for (i, (label, value)) in stats_labels.iter().zip(stats_values.iter()).enumerate() {
@@ -620,8 +610,6 @@ pub fn plot_per_base_coverage_with_range(
     Ok(())
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,19 +621,17 @@ mod tests {
         for i in 0..50u32 {
             coverage.insert(i, (i % 5) + 1);
         }
-        
+
         let out_path = "test-out/coverage.test.png";
         let _ = fs::remove_file(out_path);
         plot_per_base_coverage("chrTest", &coverage, out_path, None, true)
             .expect("PNG plotting should succeed");
-            
+
         assert!(fs::metadata(out_path).is_ok(), "Output PNG should exist");
         let meta = fs::metadata(out_path).unwrap();
         assert!(meta.len() > 0, "Output PNG should not be empty");
     }
-    
 
-    
     #[test]
     fn test_plot_per_base_coverage_with_different_themes() {
         let mut coverage = HashMap::new();
@@ -653,21 +639,35 @@ mod tests {
         for i in 0..100u32 {
             coverage.insert(i, (i % 10) + 1);
         }
-        
+
         // Test with Nord theme
         set_theme("nord");
         let out_path = "test-out/coverage.test.nord.png";
         let _ = fs::remove_file(out_path);
         plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
             .expect("plotting with Nord theme should succeed");
-        
+
         // Test with Frappe theme
         set_theme("frappe");
         let out_path = "test-out/coverage.test.frappe.png";
         let _ = fs::remove_file(out_path);
         plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
             .expect("plotting with Frappe theme should succeed");
-        
+
+        // Test with Gruvbox theme
+        set_theme("gruvbox");
+        let out_path = "test-out/coverage.test.gruvbox.png";
+        let _ = fs::remove_file(out_path);
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+            .expect("plotting with Frappe theme should succeed");
+
+        // Test with Latte theme
+        set_theme("latte");
+        let out_path = "test-out/coverage.test.latte.png";
+        let _ = fs::remove_file(out_path);
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+            .expect("plotting with Frappe theme should succeed");
+
         // Reset to default theme
         set_theme("latte");
     }
