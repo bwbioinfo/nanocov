@@ -659,14 +659,14 @@ mod tests {
         let out_path = "test-out/coverage.test.gruvbox.png";
         let _ = fs::remove_file(out_path);
         plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
-            .expect("plotting with Frappe theme should succeed");
+            .expect("plotting with Gruvbox theme should succeed");
 
         // Test with Latte theme
         set_theme("latte");
         let out_path = "test-out/coverage.test.latte.png";
         let _ = fs::remove_file(out_path);
         plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
-            .expect("plotting with Frappe theme should succeed");
+            .expect("plotting with Latte theme should succeed");
 
         // Reset to default theme
         set_theme("latte");

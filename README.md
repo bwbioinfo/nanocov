@@ -115,10 +115,10 @@ Below is a representation of how the different themes appear in the plots:
 
 | Theme | Example |
 |-------|---------|
-| **Catppuccin Latte (Default)** | ![Latte Theme](test-out/coverage.test.png) |
+| **Catppuccin Latte (Default)** | ![Latte Theme](test-out/coverage.test.latte.png) |
 | **Catppuccin Frappe (Dark)** | ![Frappe Theme](test-out/coverage.test.frappe.png) |
 | **Nord** | ![Nord Theme](test-out/coverage.test.nord.png) |
-| **Gruvbox** | ![Gruvbox Theme](test-out/coverage.test.png) |
+| **Gruvbox** | ![Gruvbox Theme](test-out/coverage.test.gruvbox.png) |
 
 To use a specific theme:
 ```bash
