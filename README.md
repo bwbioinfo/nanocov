@@ -197,22 +197,6 @@ Select a theme that works best for your publication or presentation:
 nanocov -i sample.bam --theme nord -o nord_coverage
 ```
 
-## Coverage Analysis Insights
-
-Coverage analysis with NanoCov can reveal important biological and technical insights:
-
-### Biological Insights
-- **Copy Number Variations**: Regions with significantly higher/lower coverage may indicate duplications or deletions
-- **Aneuploidy Detection**: Whole-chromosome coverage differences can reveal aneuploidy
-- **GC Bias**: Correlation between GC content and coverage depth
-- **Structural Variants**: Large coverage drops can indicate deletions or inversions
-
-### Technical Insights
-- **Sequencing Bias**: Systematic coverage patterns may reveal sequencing biases
-- **Library Complexity**: Uniformity of coverage reflects library preparation quality
-- **Targeting Efficiency**: For targeted sequencing, assess capture efficiency
-- **Sequencing Depth Adequacy**: Determine if coverage is sufficient for variant calling
-
 ## Examples
 
 ### Basic Coverage Analysis
