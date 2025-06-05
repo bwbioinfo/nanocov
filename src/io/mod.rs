@@ -10,6 +10,35 @@ use crate::cli::Cli;
 
 use crate::utils::ReadStats;
 
+/// Calculate the reference span from a CIGAR string
+/// This properly handles different CIGAR operations to get the actual alignment length on the reference
+fn calculate_reference_span(cigar: &noodles_bam::record::Cigar) -> u32 {
+    cigar.iter()
+        .filter_map(|op_result| {
+            if let Ok(op) = op_result {
+                use noodles_sam::alignment::record::cigar::op::Kind;
+                match op.kind() {
+                    // Operations that consume reference sequence
+                    Kind::Match | 
+                    Kind::Deletion | 
+                    Kind::Skip | 
+                    Kind::SequenceMatch | 
+                    Kind::SequenceMismatch => {
+                        Some(op.len() as u32)
+                    }
+                    // Operations that don't consume reference: Insertion, SoftClip, HardClip, Pad
+                    Kind::Insertion | 
+                    Kind::SoftClip | 
+                    Kind::HardClip | 
+                    Kind::Pad => None,
+                }
+            } else {
+                None // Skip invalid CIGAR operations
+            }
+        })
+        .sum()
+}
+
 pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     use std::fs::File;
@@ -80,7 +109,7 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
                         Some(Ok(pos)) => pos.get() as u32,
                         _ => continue,
                     };
-                    let len = record.cigar().len() as u32;
+                    let len = calculate_reference_span(&record.cigar());
                     let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
                     for pos in start..start + len {
                         *region_coverage.entry(pos).or_insert(0) += 1;
@@ -133,7 +162,7 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
                         Some(Ok(pos)) => pos.get() as u32,
                         _ => continue,
                     };
-                    let len = record.cigar().len() as u32;
+                    let len = calculate_reference_span(&record.cigar());
                     let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
                     for pos in start..start + len {
                         *region_coverage.entry(pos).or_insert(0) += 1;
@@ -184,7 +213,7 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
                         Some(Ok(pos)) => pos.get() as u32,
                         _ => continue,
                     };
-                    let len = record.cigar().len() as u32;
+                    let len = calculate_reference_span(&record.cigar());
                     let region_coverage = local_coverage.entry(ref_name.clone()).or_default();
                     for pos in start..start + len {
                         *region_coverage.entry(pos).or_insert(0) += 1;
