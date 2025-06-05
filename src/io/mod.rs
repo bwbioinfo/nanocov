@@ -40,6 +40,270 @@ fn calculate_reference_span(cigar: &noodles_bam::record::Cigar) -> u32 {
 }
 
 pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<dyn std::error::Error>> {
+    // Choose memory-efficient approach for large files
+    if should_use_streaming_mode(cli)? {
+        run_coverage_streaming(cli, read_stats)
+    } else {
+        run_coverage_in_memory(cli, read_stats)
+    }
+}
+
+/// Determine if we should use streaming mode based on file size and available memory
+fn should_use_streaming_mode(cli: &Cli) -> Result<bool, Box<dyn std::error::Error>> {
+    // Force streaming if explicitly requested
+    if cli.force_streaming {
+        return Ok(true);
+    }
+    
+    let bam_metadata = std::fs::metadata(&cli.input)?;
+    let file_size_mb = bam_metadata.len() / (1024 * 1024);
+    
+    // Use custom memory limit or default to 500MB
+    let memory_limit_mb = cli.memory_limit_mb.unwrap_or(500);
+    
+    // Use streaming mode for files larger than the threshold
+    Ok(file_size_mb > memory_limit_mb)
+}
+
+/// Memory-efficient streaming approach for large BAM files
+fn run_coverage_streaming(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::{Write, BufWriter};
+    use std::io::BufReader;
+    use noodles_bam as bam;
+    use noodles_core::Region;
+    use noodles_core::Position;
+    use nanocov::parse_bed;
+
+    println!("Using memory-efficient streaming mode for large BAM file");
+
+    // Open BAM file
+    let mut reader = bam::io::reader::Builder::default().build_from_path(&cli.input)?;
+    let header = reader.read_header()?;
+    let reference_sequences = header.reference_sequences();
+
+    // Parse BED files
+    let bed_regions = if let Some(bed_path) = &cli.bed {
+        Some(nanocov::parse_bed(bed_path)?)
+    } else {
+        None
+    };
+
+    let chrom_bed_regions = if let Some(chrom_bed_path) = &cli.chrom_bed {
+        Some(nanocov::parse_bed(chrom_bed_path)?)
+    } else {
+        None
+    };
+
+    // Create output file with buffered writer
+    let mut out = BufWriter::new(File::create(&cli.output)?);
+    writeln!(out, "#chromosome\tposition\tcount")?;
+
+    let mut global_avg_sum = 0.0;
+    let mut global_avg_count = 0;
+    let mut chrom_coverages: HashMap<String, HashMap<u32, u32>> = HashMap::new();
+
+    // Process each chromosome individually to save memory
+    for (chrom_name, _) in reference_sequences.iter() {
+        let chrom = chrom_name.to_string();
+        println!("Processing chromosome: {}", chrom);
+
+        let coverage = process_chromosome_streaming(&cli.input, &chrom, &bed_regions, &chrom_bed_regions)?;
+        
+        if !coverage.is_empty() {
+            // Calculate chromosome average
+            let (total, count) = coverage.values().fold((0u64, 0u64), |(t, c), v| (t + *v as u64, c + 1));
+            if count > 0 {
+                let avg = total as f64 / count as f64;
+                println!("{} average coverage: {:.2}", chrom, avg);
+                global_avg_sum += avg;
+                global_avg_count += 1;
+
+                // Store for plotting (keep minimal data)
+                chrom_coverages.insert(chrom.clone(), coverage.clone());
+            }
+
+            // Write coverage data immediately to file
+            write_chromosome_coverage(&mut out, &chrom, &coverage)?;
+        }
+
+        // Clear coverage data to free memory
+        drop(coverage);
+    }
+
+    out.flush()?;
+
+    // Print global average
+    if global_avg_count > 0 {
+        let global_avg = global_avg_sum / global_avg_count as f64;
+        println!("Global average coverage: {:.2}", global_avg);
+    }
+
+    // Generate plots with reduced memory usage (if not disabled)
+    if !cli.skip_all_plots {
+        generate_plots_from_stored_coverage(cli, &chrom_coverages, read_stats.as_ref())?;
+    } else {
+        println!("Skipping plot generation as requested (--no-plots)");
+    }
+
+    Ok(())
+}
+
+/// Process a single chromosome and return its coverage data
+fn process_chromosome_streaming(
+    bam_path: &std::path::Path,
+    chrom: &str,
+    bed_regions: &Option<std::collections::HashMap<String, Vec<(u32, u32)>>>,
+    chrom_bed_regions: &Option<std::collections::HashMap<String, Vec<(u32, u32)>>>,
+) -> Result<std::collections::HashMap<u32, u32>, Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::BufReader;
+    use noodles_bam as bam;
+    use noodles_core::Region;
+    use noodles_core::Position;
+
+    let mut reader = bam::io::Reader::new(BufReader::new(File::open(bam_path)?));
+    let mut bai_reader = noodles_bam::bai::Reader::new(File::open(&bam_path.with_extension("bam.bai"))?);
+    let index = bai_reader.read_index()?;
+    let header = reader.read_header()?;
+    let reference_sequences = header.reference_sequences();
+
+    let mut coverage: HashMap<u32, u32> = HashMap::new();
+
+    // Determine regions to process for this chromosome
+    let regions_to_process = if let Some(bed) = bed_regions {
+        bed.get(chrom).cloned().unwrap_or_default()
+    } else if let Some(chrom_bed) = chrom_bed_regions {
+        chrom_bed.get(chrom).cloned().unwrap_or_default()
+    } else {
+        // Process entire chromosome
+        if let Some((_, ref_seq)) = reference_sequences.iter().find(|(k, _)| k.to_string() == chrom) {
+            vec![(1, ref_seq.length().get() as u32)]
+        } else {
+            return Ok(coverage);
+        }
+    };
+
+    // Process each region
+    for (start, end) in regions_to_process {
+        let region = Region::new(
+            chrom.to_string(),
+            Position::try_from(start as usize)
+                .map_err(|e| format!("Invalid start position {}: {}", start, e))?
+                ..=Position::try_from(end as usize)
+                    .map_err(|e| format!("Invalid end position {}: {}", end, e))?,
+        );
+
+        let query = reader.query(&header, &index, &region)?;
+        for result in query {
+            let record = result?;
+            if record.flags().is_unmapped() {
+                continue;
+            }
+
+            let start_pos = match record.alignment_start() {
+                Some(Ok(pos)) => pos.get() as u32,
+                _ => continue,
+            };
+
+            let len = calculate_reference_span(&record.cigar());
+            
+            // Update coverage for this alignment
+            for pos in start_pos..start_pos + len {
+                if pos >= start && pos <= end {
+                    *coverage.entry(pos).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    Ok(coverage)
+}
+
+/// Write chromosome coverage data to output file
+fn write_chromosome_coverage(
+    out: &mut std::io::BufWriter<std::fs::File>,
+    chrom: &str,
+    coverage: &std::collections::HashMap<u32, u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    
+    let mut positions: Vec<_> = coverage.iter().collect();
+    positions.sort_by_key(|&(pos, _)| *pos);
+    
+    for (&pos, &count) in positions {
+        writeln!(out, "{}\t{}\t{}", chrom, pos, count)?;
+    }
+    
+    Ok(())
+}
+
+/// Generate plots with memory-efficient approach
+fn generate_plots_from_stored_coverage(
+    cli: &Cli,
+    chrom_coverages: &std::collections::HashMap<String, std::collections::HashMap<u32, u32>>,
+    read_stats: Option<&ReadStats>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
+    let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
+    
+    let file_format = if cli.svg_output {
+        "svg"
+    } else {
+        "png"
+    };
+
+    // Apply theme if specified
+    if let Some(theme) = &cli.theme {
+        crate::plotting::set_theme(theme);
+    }
+
+    // Generate individual chromosome plots
+    for (ref_name, region_coverage) in chrom_coverages {
+        let plot_path = output_dir.join(format!("{}.{}.{}", output_stem, ref_name, file_format));
+        
+        // Use full chromosome range for plotting
+        let min_pos = region_coverage.keys().min().copied().unwrap_or(0);
+        let max_pos = region_coverage.keys().max().copied().unwrap_or(0);
+        
+        crate::plotting::plot_per_base_coverage_with_range(
+            ref_name,
+            region_coverage,
+            plot_path.to_str().unwrap(),
+            min_pos,
+            max_pos,
+            read_stats,
+            cli.show_zero_regions,
+        )?;
+    }
+
+    // Generate multi-chromosome plot if we have multiple chromosomes
+    if chrom_coverages.len() > 1 {
+        let multi_plot_path = output_dir.join(format!("{}.multi_chrom.{}", output_stem, file_format));
+        
+        // Convert to the expected format for plot_all_chromosomes
+        let chrom_refs: std::collections::HashMap<String, &std::collections::HashMap<u32, u32>> = 
+            chrom_coverages.iter().map(|(k, v)| (k.clone(), v)).collect();
+        
+        // Get current theme
+        let theme = unsafe { crate::plotting::CURRENT_THEME };
+        
+        crate::plotting::plot_all_chromosomes(
+            &chrom_refs,
+            multi_plot_path.to_str().unwrap(),
+            cli.log_scale,
+            read_stats,
+            theme,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Original in-memory approach for smaller files
+fn run_coverage_in_memory(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
@@ -337,7 +601,7 @@ pub fn run_coverage(cli: &Cli, read_stats: Option<ReadStats>) -> Result<(), Box<
         println!("Global average coverage: {:.2}", global_avg);
         
         // Generate multi-chromosome plot if we have data from multiple chromosomes
-        if chrom_coverages.len() > 1 && !cli.skip_plotting && !cli.skip_multi_plot {
+        if chrom_coverages.len() > 1 && !cli.skip_all_plots && !cli.skip_multi_plot {
             let output_stem = cli.output.file_stem().unwrap_or_default().to_string_lossy();
             let output_dir = cli.output.parent().unwrap_or_else(|| std::path::Path::new("."));
             

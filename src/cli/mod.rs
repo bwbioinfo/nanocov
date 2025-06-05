@@ -68,4 +68,16 @@ pub struct Cli {
     /// Genome size in base pairs (used for coverage calculation in cramino output)
     #[arg(long = "genome-size")]
     pub genome_size: Option<u64>,
+    
+    /// Force streaming mode for memory efficiency (processes chromosomes one at a time)
+    #[arg(long = "streaming")]
+    pub force_streaming: bool,
+    
+    /// Memory limit in MB before switching to streaming mode (default: 500MB file size threshold)
+    #[arg(long = "memory-limit")]
+    pub memory_limit_mb: Option<u64>,
+    
+    /// Skip generating plots to save memory (output TSV only)
+    #[arg(long = "no-plots")]
+    pub skip_all_plots: bool,
 }
