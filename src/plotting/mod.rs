@@ -72,6 +72,7 @@ pub fn plot_per_base_coverage(
     output_path: &str,
     read_stats: Option<&ReadStats>,
     show_zero_regions: bool,
+    use_log_scale: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Use the min/max of coverage as the range
     let mut positions: Vec<u32> = coverage.keys().copied().collect();
@@ -92,6 +93,7 @@ pub fn plot_per_base_coverage(
         max_x,
         read_stats,
         show_zero_regions,
+        use_log_scale,
     )
 }
 
@@ -103,6 +105,7 @@ pub fn plot_per_base_coverage_with_range(
     plot_end: u32,
     read_stats: Option<&ReadStats>,
     show_zero_regions: bool,
+    use_log_scale: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Adaptive binning logic for large ranges
     let range = plot_end.saturating_sub(plot_start);
@@ -192,121 +195,262 @@ pub fn plot_per_base_coverage_with_range(
         format!("{} bp", bin_size)
     };
 
-    // Build the chart with large margins and axis labels for clarity
-    let mut chart = ChartBuilder::on(&plot_area)
-        .x_label_area_size(10)
-        .y_label_area_size(10)
-        .set_label_area_size(LabelAreaPosition::Left, 75)
-        .set_label_area_size(LabelAreaPosition::Bottom, 50)
-        .margin(50)
-        .caption(
-            format!("Chromosome {} Coverage (bin: {})", chrom, bin_size_label),
-            ("sans-serif", 40).into_font().color(&theme().text),
-        )
-        .build_cartesian_2d(plot_start as i64..plot_end as i64, 0f64..y_max)?;
-
-    // Configure the mesh (axes, grid, and labels)
-    chart
-        .configure_mesh()
-        .x_desc("Chromosome Position (Mb)")
-        .y_desc("Coverage")
-        .axis_desc_style(("sans-serif", 25).into_font().color(&theme().text))
-        .x_label_formatter(&|x| format!("{:.2}", (*x as f64) / 1_000_000.0)) // Format x axis in Mb
-        .x_labels(20) // Increase number of x-axis ticks
-        .x_label_style(("sans-serif", 18).into_font().color(&theme().text))
-        .y_label_style(("sans-serif", 18).into_font().color(&theme().text))
-        .y_label_formatter(&|y| format!("{:.1}", y)) // Clean y-axis formatting
-        .light_line_style(RGBAColor(100, 100, 100, 0.3)) // Subtle grid lines
-        .bold_line_style(RGBAColor(100, 100, 100, 0.5)) // Bolder major grid lines
-        .axis_style(&theme().text)
-        .draw()?;
-
-    // Draw each bar as a filled rectangle with gradient color based on coverage
-    chart.draw_series(chrom_points.windows(2).map(|w| {
-        let (x, y) = w[0];
-        let (next_x, _) = w[1];
-        let bar_end = if next_x > x {
-            next_x
-        } else {
-            x + bin_size as i64
-        };
-
-        // Color gradient based on coverage level
-        let fill_color = if y <= y_max * 0.3 {
-            // Low coverage: blend from low coverage color to main color
-            let blend_factor = (y / (y_max * 0.3)) as f64;
-            let blend_factor = blend_factor.max(0.0).min(1.0);
-            RGBColor(
-                ((theme().low.0 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.0 as f64) * blend_factor) as u8,
-                ((theme().low.1 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.1 as f64) * blend_factor) as u8,
-                ((theme().low.2 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.2 as f64) * blend_factor) as u8,
+    // Handle logarithmic and linear scaling separately due to incompatible chart types
+    if use_log_scale {
+        // Find minimum non-zero value for log scale
+        let min_coverage = chrom_points.iter()
+            .map(|&(_, y)| y)
+            .filter(|&v| v > 0.0)
+            .fold(y_max, f64::min)
+            .max(0.1); // Minimum of 0.1 for log scale
+        
+        let mut chart = ChartBuilder::on(&plot_area)
+            .x_label_area_size(10)
+            .y_label_area_size(10)
+            .set_label_area_size(LabelAreaPosition::Left, 75)
+            .set_label_area_size(LabelAreaPosition::Bottom, 50)
+            .margin(50)
+            .caption(
+                format!("Chromosome {} Coverage (bin: {}, log scale)", chrom, bin_size_label),
+                ("sans-serif", 40).into_font().color(&theme().text),
             )
-        } else if y >= y_max * 0.7 {
-            // High coverage: blend from main color to high coverage color
-            let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
-            let blend_factor = blend_factor.max(0.0).min(1.0);
-            RGBColor(
-                ((theme().primary.0 as f64) * (1.0 - blend_factor)
-                    + (theme().high.0 as f64) * blend_factor) as u8,
-                ((theme().primary.1 as f64) * (1.0 - blend_factor)
-                    + (theme().high.1 as f64) * blend_factor) as u8,
-                ((theme().primary.2 as f64) * (1.0 - blend_factor)
-                    + (theme().high.2 as f64) * blend_factor) as u8,
+            .build_cartesian_2d(
+                plot_start as i64..plot_end as i64, 
+                (min_coverage..y_max * 1.1).log_scale()
+            )?;
+
+        // Configure the mesh (axes, grid, and labels) for log scale
+        chart
+            .configure_mesh()
+            .x_desc("Chromosome Position (Mb)")
+            .y_desc("Coverage (log scale)")
+            .axis_desc_style(("sans-serif", 25).into_font().color(&theme().text))
+            .x_label_formatter(&|x| format!("{:.2}", (*x as f64) / 1_000_000.0)) // Format x axis in Mb
+            .x_labels(20) // Increase number of x-axis ticks
+            .x_label_style(("sans-serif", 18).into_font().color(&theme().text))
+            .y_label_style(("sans-serif", 18).into_font().color(&theme().text))
+            .y_label_formatter(&|y| format!("{:.1}", y)) // Clean y-axis formatting
+            .light_line_style(RGBAColor(100, 100, 100, 0.3)) // Subtle grid lines
+            .bold_line_style(RGBAColor(100, 100, 100, 0.5)) // Bolder major grid lines
+            .axis_style(&theme().text)
+            .draw()?;
+
+        // Draw each bar as a filled rectangle with gradient color based on coverage (log scale)
+        chart.draw_series(chrom_points.windows(2).filter_map(|w| {
+            let (x, y) = w[0];
+            let (next_x, _) = w[1];
+            
+            // Skip zero coverage in log scale
+            if y <= 0.0 {
+                return None;
+            }
+            
+            let bar_end = if next_x > x {
+                next_x
+            } else {
+                x + bin_size as i64
+            };
+
+            // Color gradient based on coverage level
+            let fill_color = if y <= y_max * 0.3 {
+                // Low coverage: blend from low coverage color to main color
+                let blend_factor = (y / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().low.0 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.0 as f64) * blend_factor) as u8,
+                    ((theme().low.1 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.1 as f64) * blend_factor) as u8,
+                    ((theme().low.2 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.2 as f64) * blend_factor) as u8,
+                )
+            } else if y >= y_max * 0.7 {
+                // High coverage: blend from main color to high coverage color
+                let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                        + (theme().high.0 as f64) * blend_factor) as u8,
+                    ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                        + (theme().high.1 as f64) * blend_factor) as u8,
+                    ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                        + (theme().high.2 as f64) * blend_factor) as u8,
+                )
+            } else {
+                // Medium coverage: use main color
+                theme().primary
+            };
+
+            // For log scale, use minimum coverage as baseline instead of 0
+            Some(Rectangle::new([(x, min_coverage), (bar_end, y)], fill_color.filled()))
+        }))?;
+
+        // Draw the last bar if only one point or for the last position (log scale)
+        if let Some(&(x, y)) = chrom_points.last() {
+            // Skip zero coverage in log scale
+            if y > 0.0 {
+                // Apply same color logic for last bar
+                let fill_color = if y <= y_max * 0.3 {
+                    let blend_factor = (y / (y_max * 0.3)) as f64;
+                    let blend_factor = blend_factor.max(0.0).min(1.0);
+                    RGBColor(
+                        ((theme().low.0 as f64) * (1.0 - blend_factor)
+                            + (theme().primary.0 as f64) * blend_factor) as u8,
+                        ((theme().low.1 as f64) * (1.0 - blend_factor)
+                            + (theme().primary.1 as f64) * blend_factor) as u8,
+                        ((theme().low.2 as f64) * (1.0 - blend_factor)
+                            + (theme().primary.2 as f64) * blend_factor) as u8,
+                    )
+                } else if y >= y_max * 0.7 {
+                    let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
+                    let blend_factor = blend_factor.max(0.0).min(1.0);
+                    RGBColor(
+                        ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                            + (theme().high.0 as f64) * blend_factor) as u8,
+                        ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                            + (theme().high.1 as f64) * blend_factor) as u8,
+                        ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                            + (theme().high.2 as f64) * blend_factor) as u8,
+                    )
+                } else {
+                    theme().primary
+                };
+
+                chart.draw_series(std::iter::once(Rectangle::new(
+                    [(x, min_coverage), (x + bin_size as i64, y)],
+                    fill_color.filled(),
+                )))?;
+            }
+        }
+
+        // Add threshold line if average coverage is available (log scale)
+        let y_vals: Vec<f64> = chrom_points.iter().map(|&(_, y)| y).filter(|&y| y > 0.0).collect();
+        if !y_vals.is_empty() {
+            let mean = y_vals.iter().sum::<f64>() / y_vals.len() as f64;
+            if mean >= min_coverage {
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(plot_start as i64, mean), (plot_end as i64, mean)],
+                    theme().accent.stroke_width(2),
+                )))?;
+            }
+        }
+    } else {
+        // Linear scale (original implementation)
+        let mut chart = ChartBuilder::on(&plot_area)
+            .x_label_area_size(10)
+            .y_label_area_size(10)
+            .set_label_area_size(LabelAreaPosition::Left, 75)
+            .set_label_area_size(LabelAreaPosition::Bottom, 50)
+            .margin(50)
+            .caption(
+                format!("Chromosome {} Coverage (bin: {})", chrom, bin_size_label),
+                ("sans-serif", 40).into_font().color(&theme().text),
             )
-        } else {
-            // Medium coverage: use main color
-            theme().primary
-        };
+            .build_cartesian_2d(plot_start as i64..plot_end as i64, 0f64..y_max)?;
 
-        Rectangle::new([(x, 0.0), (bar_end, y)], fill_color.filled())
-    }))?;
+        // Configure the mesh (axes, grid, and labels)
+        chart
+            .configure_mesh()
+            .x_desc("Chromosome Position (Mb)")
+            .y_desc("Coverage")
+            .axis_desc_style(("sans-serif", 25).into_font().color(&theme().text))
+            .x_label_formatter(&|x| format!("{:.2}", (*x as f64) / 1_000_000.0)) // Format x axis in Mb
+            .x_labels(20) // Increase number of x-axis ticks
+            .x_label_style(("sans-serif", 18).into_font().color(&theme().text))
+            .y_label_style(("sans-serif", 18).into_font().color(&theme().text))
+            .y_label_formatter(&|y| format!("{:.1}", y)) // Clean y-axis formatting
+            .light_line_style(RGBAColor(100, 100, 100, 0.3)) // Subtle grid lines
+            .bold_line_style(RGBAColor(100, 100, 100, 0.5)) // Bolder major grid lines
+            .axis_style(&theme().text)
+            .draw()?;
 
-    // Draw the last bar if only one point or for the last position
-    if let Some(&(x, y)) = chrom_points.last() {
-        // Apply same color logic for last bar
-        let fill_color = if y <= y_max * 0.3 {
-            let blend_factor = (y / (y_max * 0.3)) as f64;
-            let blend_factor = blend_factor.max(0.0).min(1.0);
-            RGBColor(
-                ((theme().low.0 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.0 as f64) * blend_factor) as u8,
-                ((theme().low.1 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.1 as f64) * blend_factor) as u8,
-                ((theme().low.2 as f64) * (1.0 - blend_factor)
-                    + (theme().primary.2 as f64) * blend_factor) as u8,
-            )
-        } else if y >= y_max * 0.7 {
-            let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
-            let blend_factor = blend_factor.max(0.0).min(1.0);
-            RGBColor(
-                ((theme().primary.0 as f64) * (1.0 - blend_factor)
-                    + (theme().high.0 as f64) * blend_factor) as u8,
-                ((theme().primary.1 as f64) * (1.0 - blend_factor)
-                    + (theme().high.1 as f64) * blend_factor) as u8,
-                ((theme().primary.2 as f64) * (1.0 - blend_factor)
-                    + (theme().high.2 as f64) * blend_factor) as u8,
-            )
-        } else {
-            theme().primary
-        };
+        // Draw each bar as a filled rectangle with gradient color based on coverage
+        chart.draw_series(chrom_points.windows(2).map(|w| {
+            let (x, y) = w[0];
+            let (next_x, _) = w[1];
+            let bar_end = if next_x > x {
+                next_x
+            } else {
+                x + bin_size as i64
+            };
 
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(x, 0.0), (x + bin_size as i64, y)],
-            fill_color.filled(),
-        )))?;
-    }
+            // Color gradient based on coverage level
+            let fill_color = if y <= y_max * 0.3 {
+                // Low coverage: blend from low coverage color to main color
+                let blend_factor = (y / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().low.0 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.0 as f64) * blend_factor) as u8,
+                    ((theme().low.1 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.1 as f64) * blend_factor) as u8,
+                    ((theme().low.2 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.2 as f64) * blend_factor) as u8,
+                )
+            } else if y >= y_max * 0.7 {
+                // High coverage: blend from main color to high coverage color
+                let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                        + (theme().high.0 as f64) * blend_factor) as u8,
+                    ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                        + (theme().high.1 as f64) * blend_factor) as u8,
+                    ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                        + (theme().high.2 as f64) * blend_factor) as u8,
+                )
+            } else {
+                // Medium coverage: use main color
+                theme().primary
+            };
 
-    // Add threshold line if average coverage is available
-    let y_vals: Vec<f64> = chrom_points.iter().map(|&(_, y)| y).collect();
-    if !y_vals.is_empty() {
-        let mean = y_vals.iter().sum::<f64>() / y_vals.len() as f64;
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(plot_start as i64, mean), (plot_end as i64, mean)],
-            theme().accent.stroke_width(2),
-        )))?;
+            Rectangle::new([(x, 0.0), (bar_end, y)], fill_color.filled())
+        }))?;
+
+        // Draw the last bar if only one point or for the last position
+        if let Some(&(x, y)) = chrom_points.last() {
+            // Apply same color logic for last bar
+            let fill_color = if y <= y_max * 0.3 {
+                let blend_factor = (y / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().low.0 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.0 as f64) * blend_factor) as u8,
+                    ((theme().low.1 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.1 as f64) * blend_factor) as u8,
+                    ((theme().low.2 as f64) * (1.0 - blend_factor)
+                        + (theme().primary.2 as f64) * blend_factor) as u8,
+                )
+            } else if y >= y_max * 0.7 {
+                let blend_factor = ((y - y_max * 0.7) / (y_max * 0.3)) as f64;
+                let blend_factor = blend_factor.max(0.0).min(1.0);
+                RGBColor(
+                    ((theme().primary.0 as f64) * (1.0 - blend_factor)
+                        + (theme().high.0 as f64) * blend_factor) as u8,
+                    ((theme().primary.1 as f64) * (1.0 - blend_factor)
+                        + (theme().high.1 as f64) * blend_factor) as u8,
+                    ((theme().primary.2 as f64) * (1.0 - blend_factor)
+                        + (theme().high.2 as f64) * blend_factor) as u8,
+                )
+            } else {
+                theme().primary
+            };
+
+            chart.draw_series(std::iter::once(Rectangle::new(
+                [(x, 0.0), (x + bin_size as i64, y)],
+                fill_color.filled(),
+            )))?;
+        }
+
+        // Add threshold line if average coverage is available
+        let y_vals: Vec<f64> = chrom_points.iter().map(|&(_, y)| y).collect();
+        if !y_vals.is_empty() {
+            let mean = y_vals.iter().sum::<f64>() / y_vals.len() as f64;
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(plot_start as i64, mean), (plot_end as i64, mean)],
+                theme().accent.stroke_width(2),
+            )))?;
+        }
     }
 
     // --- Apply annotations and legends in the right panel ---
@@ -624,7 +768,7 @@ mod tests {
 
         let out_path = "test-out/coverage.test.png";
         let _ = fs::remove_file(out_path);
-        plot_per_base_coverage("chrTest", &coverage, out_path, None, true)
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, true, false)
             .expect("PNG plotting should succeed");
 
         assert!(fs::metadata(out_path).is_ok(), "Output PNG should exist");
@@ -644,28 +788,28 @@ mod tests {
         set_theme("nord");
         let out_path = "test-out/coverage.test.nord.png";
         let _ = fs::remove_file(out_path);
-        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false, false)
             .expect("plotting with Nord theme should succeed");
 
         // Test with Frappe theme
         set_theme("frappe");
         let out_path = "test-out/coverage.test.frappe.png";
         let _ = fs::remove_file(out_path);
-        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false, false)
             .expect("plotting with Frappe theme should succeed");
 
         // Test with Gruvbox theme
         set_theme("gruvbox");
         let out_path = "test-out/coverage.test.gruvbox.png";
         let _ = fs::remove_file(out_path);
-        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false, false)
             .expect("plotting with Gruvbox theme should succeed");
 
         // Test with Latte theme
         set_theme("latte");
         let out_path = "test-out/coverage.test.latte.png";
         let _ = fs::remove_file(out_path);
-        plot_per_base_coverage("chrTest", &coverage, out_path, None, false)
+        plot_per_base_coverage("chrTest", &coverage, out_path, None, false, false)
             .expect("plotting with Latte theme should succeed");
 
         // Reset to default theme

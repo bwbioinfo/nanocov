@@ -276,6 +276,7 @@ fn generate_plots_from_stored_coverage(
             max_pos,
             read_stats,
             cli.show_zero_regions,
+            cli.log_scale,
         )?;
     }
 
@@ -595,6 +596,7 @@ fn run_coverage_in_memory(cli: &Cli, read_stats: Option<ReadStats>) -> Result<()
                 plot_end,
                 read_stats.as_ref(),
                 cli.show_zero_regions,
+                cli.log_scale,
             )?;
         }
         let global_avg = per_chrom_averages.iter().sum::<f64>() / per_chrom_averages.len() as f64;
