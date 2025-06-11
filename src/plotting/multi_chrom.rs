@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 /// Plot all chromosomes on a single chart for comparison
 ///
-/// Creates a bar chart showing the mean coverage for each chromosome,
+/// Creates a continuous bar chart showing 100kb-binned coverage across all chromosomes,
 /// optionally using logarithmic scale for the y-axis.
 ///
 /// # Arguments
@@ -34,8 +34,11 @@ pub fn plot_all_chromosomes(
         "chr20", "chr21", "chr22", "chrX", "chrY", "chrM", "chrMT",
     ];
     
-    // Calculate mean coverage for each chromosome
-    let mut chrom_means = Vec::new();
+    // Bin size for multi-chromosome plot
+    const BIN_SIZE: u32 = 100_000; // 100kb bins
+    
+    // Collect and bin coverage data for each chromosome
+    let mut chrom_data = Vec::new();
     
     for (chrom, coverage) in chrom_coverages {
         // Skip non-canonical chromosomes or empty data
@@ -48,11 +51,6 @@ pub fn plot_all_chromosomes(
             continue;
         }
         
-        // Calculate mean coverage
-        let total: u64 = coverage.values().map(|&v| v as u64).sum();
-        let count = coverage.len();
-        let mean = total as f64 / count as f64;
-        
         // Format chromosome name consistently for display
         let display_name = if chrom.starts_with("chr") {
             chrom.trim_start_matches("chr").to_string()
@@ -60,16 +58,35 @@ pub fn plot_all_chromosomes(
             chrom.to_string()
         };
         
-        chrom_means.push((display_name, mean));
+        // Bin the coverage data
+        let mut binned: std::collections::BTreeMap<u32, (u64, u32)> = std::collections::BTreeMap::new();
+        for (&pos, &count) in coverage.iter() {
+            let bin = (pos / BIN_SIZE) * BIN_SIZE;
+            let entry = binned.entry(bin).or_insert((0, 0));
+            entry.0 += count as u64;
+            entry.1 += 1;
+        }
+        
+        // Convert to average coverage per bin
+        let binned_coverage: Vec<(u32, f64)> = binned
+            .iter()
+            .map(|(&bin, &(sum, n))| (bin, if n > 0 { sum as f64 / n as f64 } else { 0.0 }))
+            .collect();
+        
+        if !binned_coverage.is_empty() {
+            // Calculate chromosome length (approximate)
+            let chrom_length = binned_coverage.iter().map(|(pos, _)| *pos).max().unwrap_or(0) + BIN_SIZE;
+            chrom_data.push((display_name, binned_coverage, chrom_length));
+        }
     }
     
-    if chrom_means.is_empty() {
+    if chrom_data.is_empty() {
         eprintln!("No coverage data found for canonical chromosomes");
         return Ok(());
     }
     
     // Sort chromosomes naturally (1,2,3...10,11... X,Y,MT)
-    chrom_means.sort_by(|(a, _), (b, _)| {
+    chrom_data.sort_by(|(a, _, _), (b, _, _)| {
         // Check if both are numeric chromosomes
         if let (Ok(a_num), Ok(b_num)) = (a.parse::<u32>(), b.parse::<u32>()) {
             return a_num.cmp(&b_num);
@@ -79,11 +96,11 @@ pub fn plot_all_chromosomes(
         match (a.as_str(), b.as_str()) {
             // Numbers come before letters
             (a_str, b_str) if a_str.chars().next().unwrap().is_numeric() && 
-                             !b_str.chars().next().unwrap().is_numeric() => {
+                            !b_str.chars().next().unwrap().is_numeric() => {
                 return std::cmp::Ordering::Less;
             }
             (a_str, b_str) if !a_str.chars().next().unwrap().is_numeric() && 
-                             b_str.chars().next().unwrap().is_numeric() => {
+                            b_str.chars().next().unwrap().is_numeric() => {
                 return std::cmp::Ordering::Greater;
             }
             
@@ -100,34 +117,86 @@ pub fn plot_all_chromosomes(
         }
     });
     
-    // Calculate global mean and find max/min for the plot
-    let global_mean = chrom_means.iter().map(|(_, cov)| *cov).sum::<f64>() / chrom_means.len() as f64;
-    let max_coverage = chrom_means.iter().map(|(_, cov)| *cov).fold(0.0, f64::max);
+    // Create a continuous plot data with chromosome boundaries
+    let mut plot_data: Vec<(i64, f64)> = Vec::new();
+    let mut chrom_boundaries: Vec<(String, i64, i64)> = Vec::new(); // (name, start_x, end_x)
+    let mut current_x = 0i64;
+    
+    for (chrom_name, binned_coverage, chrom_length) in &chrom_data {
+        let start_x = current_x;
+        
+        // Add binned coverage data
+        for (bin_pos, coverage) in binned_coverage {
+            let x_pos = current_x + (*bin_pos as i64 / BIN_SIZE as i64);
+            plot_data.push((x_pos, *coverage));
+        }
+        
+        // Calculate chromosome span in terms of bins
+        let chrom_span = (*chrom_length as i64 / BIN_SIZE as i64) + 1;
+        let end_x = current_x + chrom_span;
+        
+        chrom_boundaries.push((chrom_name.clone(), start_x, end_x));
+        current_x = end_x + 1; // Add gap between chromosomes
+    }
+    
+    if plot_data.is_empty() {
+        eprintln!("No binned coverage data available for plotting");
+        return Ok(());
+    }
+    
+    // Calculate max coverage for scaling
+    let max_coverage = plot_data.iter().map(|(_, cov)| *cov).fold(0.0, f64::max);
+    let global_mean = plot_data.iter().map(|(_, cov)| *cov).sum::<f64>() / plot_data.len() as f64;
     
     // Setup drawing area
-    let root = BitMapBackend::new(output_path, (1200, 800)).into_drawing_area();
+    let root = BitMapBackend::new(output_path, (1600, 800)).into_drawing_area();
     root.fill(&theme.base)?;
     
-    // Split for title and stats
-    let (title_area, chart_area) = root.split_vertically(80);
+    // Split for title
+    let (title_area, mut chart_area) = root.split_vertically(80);
     
     // Draw title
     title_area.draw_text(
-        &format!("Chromosome Coverage Overview ({})", 
-                 if use_log_scale { "Log Scale" } else { "Linear Scale" }),
+        &format!("Multi-Chromosome Coverage Overview - 100kb bins ({})", 
+                if use_log_scale { "Log Scale" } else { "Linear Scale" }),
         &("sans-serif", 30).into_font().color(&theme.text),
-        (600, 40),
+        (800, 40),
     )?;
     
-    // Get chromosome names for x-axis labels
-    let x_labels: Vec<String> = chrom_means.iter()
-        .map(|(name, _)| name.clone())
-        .collect();
+    let total_x_span = current_x - 1;
     
-    // Setup the chart - different setup for log vs linear scale
+    // Create chart with appropriate scale and draw chromosome labels/boundaries first
+    let chart_plotting_area = chart_area.margin(10, 10, 80, 60);
+    
+    // Draw chromosome labels and boundaries first (before creating the chart)
+    for (chrom_name, start_x, end_x) in &chrom_boundaries {
+        let center_x = (start_x + end_x) / 2;
+        let x_pixel = 10.0 + (center_x as f64 / total_x_span as f64) * (1600.0 - 80.0 - 20.0); // Approximate chart width
+        
+        // Draw chromosome label
+        chart_area.draw_text(
+            chrom_name,
+            &("sans-serif", 12).into_font().color(&theme.text),
+            (x_pixel as i32, 720),
+        )?;
+        
+        // Draw vertical boundary lines (except for the first chromosome)
+        if *start_x > 0 {
+            let boundary_x_pixel = 10.0 + (*start_x as f64 / total_x_span as f64) * (1600.0 - 80.0 - 20.0);
+            
+            chart_area.draw(&PathElement::new(
+                vec![
+                    (boundary_x_pixel as i32, 80),
+                    (boundary_x_pixel as i32, 640)
+                ],
+                RGBColor(100, 100, 100).stroke_width(1),
+            ))?;
+        }
+    }
+    
     if use_log_scale {
         // Find minimum non-zero value for log scale
-        let min_coverage = chrom_means.iter()
+        let min_coverage = plot_data.iter()
             .map(|(_, cov)| *cov)
             .filter(|&v| v > 0.0)
             .fold(max_coverage, f64::min)
@@ -135,9 +204,10 @@ pub fn plot_all_chromosomes(
         
         let mut chart = ChartBuilder::on(&chart_area)
             .margin(10)
-            .set_all_label_area_size(40)
+            .set_label_area_size(LabelAreaPosition::Left, 60)
+            .set_label_area_size(LabelAreaPosition::Bottom, 80)
             .build_cartesian_2d(
-                0..chrom_means.len(),
+                0..total_x_span,
                 (min_coverage..max_coverage * 1.1).log_scale(),
             )?;
             
@@ -145,108 +215,105 @@ pub fn plot_all_chromosomes(
             .disable_x_mesh()
             .y_desc("Coverage (log scale)")
             .x_desc("Chromosome")
-            .x_labels(chrom_means.len())
-            .x_label_formatter(&|idx| {
-                if *idx < x_labels.len() {
-                    x_labels[*idx].clone()
-                } else {
-                    String::new()
-                }
-            })
+            .x_labels(0)
             .draw()?;
             
-        // Draw bars
-        for (i, (_, coverage)) in chrom_means.iter().enumerate() {
-            let color = get_color_for_coverage(*coverage, max_coverage, theme);
-            chart.draw_series(std::iter::once(
-                Rectangle::new([(i, min_coverage), (i + 1, *coverage)], color.filled())
-            ))?;
+        // Draw bars for each bin
+        for window in plot_data.windows(2) {
+            let (x1, y1) = window[0];
+            let (x2, _) = window[1];
+            
+            if y1 > 0.0 {
+                let color = get_color_for_coverage(y1, max_coverage, theme);
+                let bar_width = (x2 - x1).max(1);
+                chart.draw_series(std::iter::once(
+                    Rectangle::new([(x1, min_coverage), (x1 + bar_width, y1)], color.filled())
+                ))?;
+            }
+        }
+        
+        // Draw the last bar
+        if let Some(&(x, y)) = plot_data.last() {
+            if y > 0.0 {
+                let color = get_color_for_coverage(y, max_coverage, theme);
+                chart.draw_series(std::iter::once(
+                    Rectangle::new([(x, min_coverage), (x + 1, y)], color.filled())
+                ))?;
+            }
         }
         
         // Draw global mean line if it's in range
         if global_mean >= min_coverage {
             chart.draw_series(LineSeries::new(
-                vec![(0, global_mean), (chrom_means.len() - 1, global_mean)],
+                vec![(0, global_mean), (total_x_span, global_mean)],
                 theme.accent.stroke_width(2),
-            ))?;
-            
-            // Add annotation
-            chart.draw_series(std::iter::once(
-                Text::new(
-                    format!("Global Mean: {:.2}", global_mean),
-                    (chrom_means.len() / 2, global_mean * 1.2),
-                    ("sans-serif", 18).into_font().color(&theme.accent),
-                )
             ))?;
         }
     } else {
         // Linear scale chart
         let mut chart = ChartBuilder::on(&chart_area)
             .margin(10)
-            .set_all_label_area_size(40)
+            .set_label_area_size(LabelAreaPosition::Left, 60)
+            .set_label_area_size(LabelAreaPosition::Bottom, 80)
             .build_cartesian_2d(
-                0..chrom_means.len(),
+                0..total_x_span,
                 0.0..max_coverage * 1.1,
             )?;
             
         chart.configure_mesh()
             .disable_x_mesh()
-            .y_desc("Mean Coverage")
+            .y_desc("Coverage")
             .x_desc("Chromosome")
-            .x_labels(chrom_means.len())
-            .x_label_formatter(&|idx| {
-                if *idx < x_labels.len() {
-                    x_labels[*idx].clone()
-                } else {
-                    String::new()
-                }
-            })
+            .x_labels(0)
             .draw()?;
             
-        // Draw bars
-        for (i, (_, coverage)) in chrom_means.iter().enumerate() {
-            let color = get_color_for_coverage(*coverage, max_coverage, theme);
+        // Draw bars for each bin
+        for window in plot_data.windows(2) {
+            let (x1, y1) = window[0];
+            let (x2, _) = window[1];
+            
+            let color = get_color_for_coverage(y1, max_coverage, theme);
+            let bar_width = (x2 - x1).max(1);
             chart.draw_series(std::iter::once(
-                Rectangle::new([(i, 0.0), (i + 1, *coverage)], color.filled())
+                Rectangle::new([(x1, 0.0), (x1 + bar_width, y1)], color.filled())
+            ))?;
+        }
+        
+        // Draw the last bar
+        if let Some(&(x, y)) = plot_data.last() {
+            let color = get_color_for_coverage(y, max_coverage, theme);
+            chart.draw_series(std::iter::once(
+                Rectangle::new([(x, 0.0), (x + 1, y)], color.filled())
             ))?;
         }
         
         // Draw global mean line
         chart.draw_series(LineSeries::new(
-            vec![(0, global_mean), (chrom_means.len() - 1, global_mean)],
+            vec![(0, global_mean), (total_x_span, global_mean)],
             theme.accent.stroke_width(2),
-        ))?;
-        
-        // Add annotation
-        chart.draw_series(std::iter::once(
-            Text::new(
-                format!("Global Mean: {:.2}", global_mean),
-                (chrom_means.len() / 2, global_mean * 1.2),
-                ("sans-serif", 18).into_font().color(&theme.accent),
-            )
         ))?;
     }
     
     // Add stats at the bottom
-    let (max_chrom, max_cov) = chrom_means.iter()
+    let (max_chrom, max_cov) = chrom_data.iter()
+        .flat_map(|(name, bins, _)| bins.iter().map(|(_, cov)| (name.as_str(), *cov)))
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(name, cov)| (name.as_str(), *cov))
         .unwrap_or(("", 0.0));
         
-    let (min_chrom, min_cov) = chrom_means.iter()
+    let (min_chrom, min_cov) = chrom_data.iter()
+        .flat_map(|(name, bins, _)| bins.iter().map(|(_, cov)| (name.as_str(), *cov)))
         .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(name, cov)| (name.as_str(), *cov))
         .unwrap_or(("", 0.0));
     
     let stats_text = format!(
         "Chromosomes: {}   |   Global Mean: {:.2}   |   Max: {:.2} ({})   |   Min: {:.2} ({})",
-        chrom_means.len(), global_mean, max_cov, max_chrom, min_cov, min_chrom
+        chrom_data.len(), global_mean, max_cov, max_chrom, min_cov, min_chrom
     );
     
     chart_area.draw_text(
         &stats_text,
-        &("sans-serif", 18).into_font().color(&theme.text),
-        (600, 760),
+        &("sans-serif", 16).into_font().color(&theme.text),
+        (800, 780),
     )?;
     
     // Add read stats if available
@@ -258,11 +325,14 @@ pub fn plot_all_chromosomes(
         
         chart_area.draw_text(
             &read_stats_text,
-            &("sans-serif", 18).into_font().color(&theme.text),
-            (600, 730),
+            &("sans-serif", 16).into_font().color(&theme.text),
+            (800, 760),
         )?;
     }
     
+    // Present the chart to finalize it (must be at the very end)
+    root.present()?;
+
     Ok(())
 }
 
@@ -304,7 +374,7 @@ mod tests {
         let mut chr2_coverage = HashMap::new();
         let mut chr_x_coverage = HashMap::new();
         
-        for i in 0..100u32 {
+        for i in 0..100000u32 {
             chr1_coverage.insert(i, 10 + (i % 5));  // Higher coverage
             chr2_coverage.insert(i, 5 + (i % 3));   // Medium coverage
             chr_x_coverage.insert(i, 2 + (i % 2));   // Lower coverage
